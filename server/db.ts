@@ -10,7 +10,19 @@ export function openDb(file: string): DB {
   const dir = path.join(import.meta.dirname, 'migrations');
   for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) {
     if (db.prepare('SELECT 1 FROM _migrations WHERE name=?').get(f)) continue;
-    db.transaction(() => { db.exec(fs.readFileSync(path.join(dir, f), 'utf8')); db.prepare('INSERT INTO _migrations VALUES(?)').run(f); })();
+    try {
+      db.transaction(() => {
+        db.exec(fs.readFileSync(path.join(dir, f), 'utf8'));
+        db.prepare('INSERT INTO _migrations VALUES(?)').run(f);
+      })();
+    } catch (err: any) {
+      if (err.message && err.message.includes('duplicate column name')) {
+        console.warn(`[Migrations] Column already present in ${f}, marking migration as applied.`);
+        db.prepare('INSERT OR IGNORE INTO _migrations VALUES(?)').run(f);
+      } else {
+        throw err;
+      }
+    }
   }
   return db;
 }

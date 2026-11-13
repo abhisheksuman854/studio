@@ -20,8 +20,10 @@ export class LocalTTSProvider implements TTSProvider {
     if (process.platform === 'darwin') {
       try {
         const tempAiff = path.join(targetDir, `temp_${Date.now()}.aiff`);
-        // Use high quality macOS voice (Samantha / Daniel / Alex)
-        await execFileAsync('say', ['-v', voiceStyle || 'Samantha', '-o', tempAiff, text]);
+        // If text contains Devanagari Hindi characters, automatically use native Lekha voice
+        const isHindi = /[\u0900-\u097F]/.test(text) || (voiceStyle && voiceStyle.toLowerCase().includes('hindi'));
+        const selectedVoice = isHindi ? 'Lekha' : (voiceStyle || 'Samantha');
+        await execFileAsync('say', ['-v', selectedVoice, '-o', tempAiff, text]);
 
         // Convert AIFF to MP3 with FFmpeg
         await execFileAsync('ffmpeg', ['-y', '-i', tempAiff, '-codec:a', 'libmp3lame', '-qscale:a', '2', outPath]);

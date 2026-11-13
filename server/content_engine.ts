@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { Request, Response, Router } from 'express';
 import express from 'express';
 import fs from 'node:fs';
@@ -14,7 +16,53 @@ import { LocalTTSProvider } from './providers/tts.js';
 import type { BrandContext } from './providers/types.js';
 import { FFmpegVideoProvider, generateSrtContent } from './providers/video.js';
 import { AIDanceMotionProvider } from './providers/dance_motion.js';
-import { NeuralDanceProvider } from './providers/neural_dance.js';
+import { NeuralDanceProvider, formatHumanReadableGpuError } from './providers/neural_dance.js';
+import { CharacterGeneratorProvider } from './providers/character_gen.js';
+import { LivePortraitFaceAnimatorProvider } from './providers/face_animator.js';
+import { RAGEngine } from './providers/rag_engine.js';
+
+const execFileAsync = promisify(execFile);
+
+export async function prepareMultiAngleBeatPortrait(
+  baseImagePath: string,
+  contentItemId: number,
+  sceneOrder: number,
+  targetDir: string
+): Promise<string> {
+  const outFile = path.join(targetDir, `beat_prep_${contentItemId}_${sceneOrder}.jpg`);
+  if (fs.existsSync(outFile) && fs.existsSync(baseImagePath)) {
+    const srcMtime = fs.statSync(baseImagePath).mtimeMs;
+    const outMtime = fs.statSync(outFile).mtimeMs;
+    if (outMtime >= srcMtime) return outFile;
+  }
+
+  const filters = [
+    // 1. Medium shot (Intro hook): centered, warm rim light
+    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.22,eq=contrast=1.04:saturation=1.06',
+    // 2. Tight intimate close-up (Mudra & gaze): 1.25x zoom on eyes & chest
+    'scale=1350:2400:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.18,eq=contrast=1.06:saturation=1.08',
+    // 3. Dynamic wide performance angle: showing dynamic attire and stage atmosphere
+    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.28,eq=contrast=1.05:saturation=1.06',
+    // 4. Dramatic high-contrast theatrical angle: climax pose
+    'scale=1180:2098:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.20,eq=contrast=1.08:saturation=1.08',
+    // 5. Warm closing aesthetic: soft glow & elegant finishing pose
+    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.24,eq=contrast=1.04:saturation=1.05',
+  ];
+
+  const filter = filters[(sceneOrder - 1) % filters.length];
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i', baseImagePath,
+      '-vf', filter,
+      '-q:v', '2',
+      outFile,
+    ]);
+    return outFile;
+  } catch {
+    return baseImagePath;
+  }
+}
 
 export const DANCER_ARCHETYPES = [
   {
@@ -141,14 +189,155 @@ export const DANCER_ARCHETYPES = [
 export function createContentEngineRouter(db: DB): Router {
   const router = express.Router();
 
-  const llm = new LocalLLMProvider();
+  const ragEngine = new RAGEngine(db);
+  const llm = new LocalLLMProvider(ragEngine);
   const tts = new LocalTTSProvider();
   const imageProvider = new LocalImageProvider();
   const videoProvider = new FFmpegVideoProvider();
+  const characterGen = new CharacterGeneratorProvider(db);
+
+  // RAG Choreography & Consistency Knowledge Store API
+  router.get('/rag/knowledge', (req: Request, res: Response) => {
+    const category = req.query.category as string | undefined;
+    const items = ragEngine.listKnowledge(category);
+    res.json(items);
+  });
+
+  router.get('/rag/search', (req: Request, res: Response) => {
+    const q = (req.query.q as string) || '';
+    const category = req.query.category as string | undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : 4;
+    const results = ragEngine.search(q, { category, limit });
+    res.json(results);
+  });
+
+  router.post('/rag/knowledge', (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        category: z.enum(['CHOREOGRAPHY', 'VIRAL_HOOKS', 'CHARACTER_CONSISTENCY', 'SAFETY_POLICY']),
+        title: z.string().min(2),
+        content: z.string().min(5),
+        tags: z.array(z.string()).default([]),
+        metadata: z.record(z.any()).optional(),
+      });
+      const p = schema.safeParse(req.body);
+      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+      const created = ragEngine.addKnowledge(p.data);
+      res.status(201).json({ ok: true, item: created });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to add knowledge item' });
+    }
+  });
 
   // Dancer Archetypes API
   router.get('/characters/archetypes', (_req: Request, res: Response) => {
     res.json(DANCER_ARCHETYPES);
+  });
+
+  // Generate & Persist AI Character Entity with Identity Tokens
+  router.post('/characters/generate-entity', async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        brandId: z.number().int(),
+        name: z.string().min(1).max(100),
+        role: z.string().optional(),
+        region: z.string().optional(),
+        age: z.number().int().min(18).max(90).optional(),
+        appearance: z.string().min(3),
+        clothingStyle: z.string().min(3),
+        personality: z.string().optional(),
+        voiceStyle: z.string().optional(),
+        customPrompt: z.string().optional(),
+      });
+      const p = schema.safeParse(req.body);
+      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+      const userId = uid(req);
+      const brand = db.prepare('SELECT id FROM brands WHERE id=? AND ownerId=?').get(p.data.brandId, userId);
+      if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+      const entity = await characterGen.generateAndPersistCharacter({
+        ownerId: userId,
+        brandId: p.data.brandId,
+        name: p.data.name,
+        role: p.data.role,
+        region: p.data.region,
+        age: p.data.age,
+        appearance: p.data.appearance,
+        clothingStyle: p.data.clothingStyle,
+        personality: p.data.personality,
+        voiceStyle: p.data.voiceStyle,
+        customPrompt: p.data.customPrompt,
+      });
+
+      res.status(201).json({ ok: true, character: entity });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to generate character entity' });
+    }
+  });
+
+  // Get Character Identity & Scene Injection Data
+  router.get('/characters/:id/identity', (req: Request, res: Response) => {
+    const userId = uid(req);
+    const char = characterGen.getCharacterById(Number(req.params.id), userId);
+    if (!char) return res.status(404).json({ error: 'Character not found' });
+    res.json(char);
+  });
+
+  // Animate Character Face with LivePortrait
+  router.post('/characters/:id/animate-face', async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        motionPreset: z.enum(['natural_speaking', 'dramatic_intro', 'subtle_gaze', 'expressive_recital']).default('natural_speaking'),
+        durationSec: z.number().int().min(2).max(15).default(4),
+      });
+      const p = schema.safeParse(req.body);
+      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+      const userId = uid(req);
+      const char = characterGen.getCharacterById(Number(req.params.id), userId);
+      if (!char) return res.status(404).json({ error: 'Character not found' });
+
+      // Find source portrait file
+      const imgDir = path.resolve('./data/storage/images');
+      let sourcePath = '';
+      if (char.referenceImage) {
+        const filename = char.referenceImage.split('/').pop() || '';
+        const candidate = path.join(imgDir, filename);
+        if (fs.existsSync(candidate)) sourcePath = candidate;
+      }
+      if (!sourcePath) {
+        const fallback = path.join(imgDir, 'priya_portrait.jpg');
+        if (fs.existsSync(fallback)) sourcePath = fallback;
+      }
+
+      if (!sourcePath) {
+        return res.status(400).json({ error: 'Character reference image not found on disk' });
+      }
+
+      const faceAnimator = new LivePortraitFaceAnimatorProvider();
+      const vidDir = path.resolve('./data/storage/videos');
+      fs.mkdirSync(vidDir, { recursive: true });
+      const outputVideoPath = path.join(vidDir, `animated_face_${char.id}_${Date.now()}.mp4`);
+
+      await faceAnimator.animateFace({
+        sourceImagePath: sourcePath,
+        motionPreset: p.data.motionPreset,
+        durationSec: p.data.durationSec,
+        outputVideoPath,
+      });
+
+      res.json({
+        ok: true,
+        characterId: char.id,
+        videoUrl: `/api/media/videos/${path.basename(outputVideoPath)}`,
+        motionPreset: p.data.motionPreset,
+        durationSec: p.data.durationSec,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to animate character face' });
+    }
   });
 
   // Generate / Preview Live Custom Character Portrait
@@ -211,9 +400,14 @@ export function createContentEngineRouter(db: DB): Router {
         return res.json({ ok: true, character: existing, alreadyAdopted: true });
       }
 
+      const tokens = characterGen.extractIdentityTokens(arc.appearance, arc.clothingStyle);
+
       const row = db.prepare(`
-        INSERT INTO characters(ownerId, brandId, name, description, age, personality, appearance, clothingStyle, visualPrompt, negativePrompt, voiceStyle)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO characters(
+          ownerId, brandId, name, description, age, personality, appearance,
+          clothingStyle, visualPrompt, negativePrompt, voiceStyle,
+          referenceImage, generationModel, generationParameters, identityTokens, metadata, createdAt, updatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `).run(
         userId,
         brand.id,
@@ -225,7 +419,12 @@ export function createContentEngineRouter(db: DB): Router {
         arc.clothingStyle,
         arc.visualPrompt,
         'nudity, deformed, bad anatomy, blur, low quality, distortion',
-        arc.voiceStyle
+        arc.voiceStyle,
+        arc.portraitUrl,
+        'CURATED_LUXURY_ARCHETYPE',
+        JSON.stringify({ archetypeId: arc.archetypeId, role: arc.role, region: arc.region }),
+        JSON.stringify(tokens),
+        JSON.stringify({ region: arc.region, flag: arc.regionFlag })
       );
 
       const created = db.prepare('SELECT * FROM characters WHERE id=?').get(row.lastInsertRowid);
@@ -578,6 +777,262 @@ export function createContentEngineRouter(db: DB): Router {
     }
   });
 
+  // Attach Custom Music / Hindi Song Track to Content Item
+  router.post('/content/:id/attach-music', async (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      const userId = uid(req);
+
+      const schema = z.object({
+        audioBase64: z.string().optional(),
+        audioUrl: z.string().optional(),
+        filename: z.string().optional(),
+      });
+      const p = schema.safeParse(req.body);
+      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+      const targetDir = path.resolve('./data/storage/audio');
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const safeName = p.data.filename
+        ? p.data.filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
+        : `custom_music_${contentItemId}_${Date.now()}.mp3`;
+      const outFile = path.join(targetDir, safeName);
+
+      if (p.data.audioUrl) {
+        const resp = await fetch(p.data.audioUrl);
+        if (!resp.ok) throw new Error(`Failed to download audio from URL (HTTP ${resp.status})`);
+        const buf = await resp.arrayBuffer();
+        fs.writeFileSync(outFile, Buffer.from(buf));
+      } else if (p.data.audioBase64) {
+        const cleanB64 = p.data.audioBase64.replace(/^data:audio\/[a-zA-Z0-9]+;base64,/, '');
+        fs.writeFileSync(outFile, Buffer.from(cleanB64, 'base64'));
+      } else {
+        return res.status(400).json({ error: 'Either audioBase64 or audioUrl must be provided' });
+      }
+
+      // Also copy to hindi_music.mp3 as active default
+      try {
+        fs.copyFileSync(outFile, path.join(targetDir, 'hindi_music.mp3'));
+      } catch {}
+
+      // Record in assets
+      db.prepare("DELETE FROM assets WHERE contentItemId=? AND type='MUSIC'").run(contentItemId);
+      db.prepare(`
+        INSERT INTO assets(ownerId, contentItemId, type, provider, filePath, mimeType)
+        VALUES (?, ?, 'MUSIC', 'CustomUpload', ?, 'audio/mpeg')
+      `).run(userId, contentItemId, outFile);
+
+      res.status(201).json({ ok: true, filePath: outFile, filename: path.basename(outFile) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to attach music track' });
+    }
+  });
+
+  // Attach Dance Reference Video (via YouTube Short / Video link or file upload) & Auto-Sync to 5 Beats
+  router.post('/content/:id/attach-dance-reference', async (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      const userId = uid(req);
+
+      const schema = z.object({
+        youtubeUrl: z.string().optional(),
+        videoUrl: z.string().optional(),
+        videoBase64: z.string().optional(),
+        filename: z.string().optional(),
+        autoSlice: z.boolean().default(true),
+      });
+      const p = schema.safeParse(req.body);
+      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+      const targetDir = path.resolve('./data/storage/videos');
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const safeName = p.data.filename
+        ? `ref_${contentItemId}_${p.data.filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`
+        : `ref_dance_${contentItemId}_${Date.now()}.mp4`;
+      const outFile = path.join(targetDir, safeName.endsWith('.mp4') ? safeName : `${safeName}.mp4`);
+
+      if (p.data.youtubeUrl && p.data.youtubeUrl.trim()) {
+        const cleanYtUrl = p.data.youtubeUrl.trim();
+        console.log(`[DanceReference] Downloading YouTube dance reference: ${cleanYtUrl}`);
+        const ytDlpBin = fs.existsSync('/opt/homebrew/bin/yt-dlp') ? '/opt/homebrew/bin/yt-dlp' : 'yt-dlp';
+
+        try {
+          await execFileAsync(ytDlpBin, [
+            '--no-playlist',
+            '-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            '--merge-output-format', 'mp4',
+            '--no-progress',
+            '-o', outFile,
+            cleanYtUrl,
+          ], { timeout: 360_000, maxBuffer: 100 * 1024 * 1024 });
+        } catch (ytErr: any) {
+          // Check if file was successfully written and merged despite non-fatal warnings
+          if (fs.existsSync(outFile) && fs.statSync(outFile).size > 1000) {
+            console.warn('[DanceReference] yt-dlp completed with non-fatal code, valid output file verified:', fs.statSync(outFile).size);
+          } else {
+            console.error('[DanceReference] yt-dlp error:', ytErr.message);
+            throw new Error(`YouTube download failed: ${ytErr.message || 'Could not fetch video stream'}`);
+          }
+        }
+      } else if (p.data.videoUrl && p.data.videoUrl.trim()) {
+        const resp = await fetch(p.data.videoUrl.trim());
+        if (!resp.ok) throw new Error(`Failed to download reference video from URL (HTTP ${resp.status})`);
+        const buf = await resp.arrayBuffer();
+        fs.writeFileSync(outFile, Buffer.from(buf));
+      } else if (p.data.videoBase64) {
+        const cleanB64 = p.data.videoBase64.replace(/^data:video\/[a-zA-Z0-9]+;base64,/, '');
+        fs.writeFileSync(outFile, Buffer.from(cleanB64, 'base64'));
+      } else {
+        return res.status(400).json({ error: 'Please provide either a YouTube video link or upload a video file.' });
+      }
+
+      if (!fs.existsSync(outFile) || fs.statSync(outFile).size < 1000) {
+        throw new Error('Downloaded reference video file is empty or corrupted');
+      }
+
+      // Record in assets as REFERENCE_VIDEO
+      db.prepare("DELETE FROM assets WHERE contentItemId=? AND type='REFERENCE_VIDEO'").run(contentItemId);
+      db.prepare(`
+        INSERT INTO assets(ownerId, contentItemId, type, provider, filePath, mimeType)
+        VALUES (?, ?, 'REFERENCE_VIDEO', ?, ?, 'video/mp4')
+      `).run(userId, contentItemId, p.data.youtubeUrl ? 'YouTube' : 'CustomUpload', outFile);
+
+      // Auto-slice reference video across all 5 scene beats if autoSlice is enabled
+      let slicedCount = 0;
+      if (p.data.autoSlice !== false) {
+        const script = db.prepare('SELECT * FROM scripts WHERE contentItemId=?').get(contentItemId) as any;
+        if (script) {
+          const scenes = db.prepare('SELECT * FROM scenes WHERE scriptId=? ORDER BY sceneOrder ASC').all(script.id) as any[];
+          let startOffset = 0;
+
+          for (const sc of scenes) {
+            const dur = sc.durationSec || 8;
+            const sliceFile = path.join(targetDir, `clip_ref_${contentItemId}_${sc.id}_${Date.now()}.mp4`);
+            try {
+              // Extract slice with zero stretching: centered character with dynamic ambient-blur background fill
+              await execFileAsync('ffmpeg', [
+                '-y',
+                '-ss', String(startOffset),
+                '-t', String(dur),
+                '-i', outFile,
+                '-filter_complex', '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p',
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-pix_fmt', 'yuv420p',
+                '-an',
+                '-r', '30',
+                sliceFile,
+              ], { maxBuffer: 50 * 1024 * 1024 });
+
+              if (fs.existsSync(sliceFile) && fs.statSync(sliceFile).size > 1000) {
+                db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='REFERENCE_SLICE'").run(contentItemId, sc.id);
+                db.prepare(`
+                  INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
+                  VALUES (?, ?, ?, 'REFERENCE_SLICE', 'DanceReference/Slice', ?, 'video/mp4')
+                `).run(userId, contentItemId, sc.id, sliceFile);
+
+                // Auto-wire as active scene video so master render immediately uses real dance choreography
+                db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sc.id);
+                db.prepare(`
+                  INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
+                  VALUES (?, ?, ?, 'SCENE_VIDEO', 'DanceReference/PhysicalVideo', ?, 'video/mp4')
+                `).run(userId, contentItemId, sc.id, sliceFile);
+                slicedCount++;
+              }
+            } catch (sliceErr: any) {
+              console.warn(`[DanceReference] Failed to slice beat ${sc.sceneOrder}:`, sliceErr.message);
+            }
+            startOffset += dur;
+          }
+        }
+      }
+
+      res.status(201).json({
+        ok: true,
+        filePath: outFile,
+        filename: path.basename(outFile),
+        referenceUrl: `/storage/videos/${path.basename(outFile)}`,
+        slicedCount,
+      });
+    } catch (err: any) {
+      console.error('[DanceReference Error]:', err);
+      res.status(500).json({ error: err.message || 'Failed to attach dance reference video' });
+    }
+  });
+
+  // Apply Dance Reference Slices to All Scene Beats
+  router.post('/content/:id/apply-dance-reference', (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      const userId = uid(req);
+      const script = db.prepare('SELECT * FROM scripts WHERE contentItemId=?').get(contentItemId) as any;
+      if (!script) return res.status(404).json({ error: 'Script not found' });
+      const scenes = db.prepare('SELECT * FROM scenes WHERE scriptId=? ORDER BY sceneOrder ASC').all(script.id) as any[];
+
+      let count = 0;
+      for (const sc of scenes) {
+        const slice = db.prepare("SELECT * FROM assets WHERE contentItemId=? AND sceneId=? AND type='REFERENCE_SLICE' ORDER BY id DESC").get(contentItemId, sc.id) as any;
+        if (slice && fs.existsSync(slice.filePath)) {
+          db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sc.id);
+          db.prepare(`
+            INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
+            VALUES (?, ?, ?, 'SCENE_VIDEO', 'DanceReference/PhysicalVideo', ?, 'video/mp4')
+          `).run(userId, contentItemId, sc.id, slice.filePath);
+          count++;
+        }
+      }
+      res.json({ ok: true, count, message: `Applied authentic dance reference moves to ${count} beats!` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Apply Dance Reference Slice to a Single Beat
+  router.post('/content/:id/scenes/:sceneId/use-reference-slice', (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      const sceneId = Number(req.params.sceneId);
+      const userId = uid(req);
+      const slice = db.prepare("SELECT * FROM assets WHERE contentItemId=? AND sceneId=? AND type='REFERENCE_SLICE' ORDER BY id DESC").get(contentItemId, sceneId) as any;
+      if (!slice || !fs.existsSync(slice.filePath)) {
+        return res.status(404).json({ error: 'No reference dance slice found for this beat. Please attach a dance reference video first.' });
+      }
+      db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sceneId);
+      db.prepare(`
+        INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
+        VALUES (?, ?, ?, 'SCENE_VIDEO', 'DanceReference/PhysicalVideo', ?, 'video/mp4')
+      `).run(userId, contentItemId, sceneId, slice.filePath);
+      res.json({ ok: true, message: 'Authentic dance reference clip applied to beat!' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Clear Scene Video Clip (revert to clean camera motion)
+  router.delete('/content/:id/scenes/:sceneId/video', (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      const sceneId = Number(req.params.sceneId);
+      db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sceneId);
+      res.json({ ok: true, message: 'Cleared scene video clip. Beat will now use smooth cinematic camera motion.' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Remove Dance Reference Video
+  router.delete('/content/:id/dance-reference', (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      db.prepare("DELETE FROM assets WHERE contentItemId=? AND type='REFERENCE_VIDEO'").run(contentItemId);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // 1-Click Auto Animate a Single Scene Beat
   router.post('/content/:id/scenes/:sceneId/auto-animate', async (req: Request, res: Response) => {
     try {
@@ -599,23 +1054,54 @@ export function createContentEngineRouter(db: DB): Router {
         ? imgAsset.filePath
         : path.resolve('./data/storage/images/rhea_bralette_portrait.jpg');
 
-      const danceProvider = new AIDanceMotionProvider();
-      await danceProvider.generateDanceClip({
-        sceneOrder: scene.sceneOrder || 1,
-        durationSec: scene.durationSec || 9,
-        portraitPath,
-        choreographyType: scene.endingType || 'DANCE',
-        outputPath: outFile,
-      });
+      const config = getNeuralConfig();
+      const hasGpu = Boolean(config.gpuServerUrl && config.gpuServerUrl.trim());
+      let providerUsed = 'AIDanceEngine/Auto';
+
+      if (hasGpu) {
+        try {
+          const neuralProvider = new NeuralDanceProvider();
+          const neuralRes = await neuralProvider.generateNeuralDanceVideo({
+            sceneOrder: scene.sceneOrder || 1,
+            durationSec: scene.durationSec || 5,
+            portraitPath,
+            visualPrompt: scene.visualPrompt || 'Bollywood expressive classical fusion dance in rain',
+            outputPath: outFile,
+            gpuServerUrl: config.gpuServerUrl,
+            apiProvider: config.apiProvider,
+            apiKey: config.apiKey,
+          });
+          providerUsed = neuralRes.providerUsed;
+        } catch (e: any) {
+          console.warn(`[Auto-Animate] Neural GPU failed for scene ${sceneId}, falling back to local motion:`, e.message);
+          const danceProvider = new AIDanceMotionProvider();
+          await danceProvider.generateDanceClip({
+            sceneOrder: scene.sceneOrder || 1,
+            durationSec: scene.durationSec || 9,
+            portraitPath,
+            choreographyType: scene.endingType || 'DANCE',
+            outputPath: outFile,
+          });
+        }
+      } else {
+        const danceProvider = new AIDanceMotionProvider();
+        await danceProvider.generateDanceClip({
+          sceneOrder: scene.sceneOrder || 1,
+          durationSec: scene.durationSec || 9,
+          portraitPath,
+          choreographyType: scene.endingType || 'DANCE',
+          outputPath: outFile,
+        });
+      }
 
       // Record in assets
       db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sceneId);
       db.prepare(`
         INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
-        VALUES (?, ?, ?, 'SCENE_VIDEO', 'AIDanceEngine/Auto', ?, 'video/mp4')
-      `).run(userId, contentItemId, sceneId, outFile);
+        VALUES (?, ?, ?, 'SCENE_VIDEO', ?, ?, 'video/mp4')
+      `).run(userId, contentItemId, sceneId, providerUsed, outFile);
 
-      res.status(200).json({ ok: true, filePath: outFile });
+      res.status(200).json({ ok: true, filePath: outFile, providerUsed });
     } catch (err: any) {
       console.error('Auto animate error:', err);
       res.status(500).json({ error: err.message || 'Failed to auto-animate scene' });
@@ -635,35 +1121,115 @@ export function createContentEngineRouter(db: DB): Router {
       const targetDir = path.resolve('./data/storage/videos');
       fs.mkdirSync(targetDir, { recursive: true });
 
+      const config = getNeuralConfig();
+      const neuralProvider = new NeuralDanceProvider();
       const danceProvider = new AIDanceMotionProvider();
       const results = [];
+      const hasGpu = Boolean(config.gpuServerUrl && config.gpuServerUrl.trim());
+
+      const gpuErrors: Array<{ sceneId: number; error: string }> = [];
 
       for (const sc of scenes) {
         const outFile = path.join(targetDir, `clip_${contentItemId}_${sc.id}_${Date.now()}.mp4`);
         const imgAsset = (db.prepare("SELECT * FROM assets WHERE contentItemId=? AND type='IMAGE' AND sceneId=? ORDER BY id DESC").get(contentItemId, sc.id)
           || db.prepare("SELECT * FROM assets WHERE contentItemId=? AND type='IMAGE' ORDER BY id DESC").get(contentItemId)) as any;
-        const portraitPath = imgAsset?.filePath && fs.existsSync(imgAsset.filePath)
-          ? imgAsset.filePath
-          : path.resolve('./data/storage/images/rhea_bralette_portrait.jpg');
 
-        await danceProvider.generateDanceClip({
-          sceneOrder: sc.sceneOrder || 1,
-          durationSec: sc.durationSec || 9,
-          portraitPath,
-          choreographyType: sc.endingType || 'DANCE',
-          outputPath: outFile,
-        });
+        // Resolve dancer persona portrait
+        let basePortrait = path.resolve('./data/storage/images/zara_portrait.jpg');
+        const fullContentText = `${script.title || ''} ${script.premise || ''} ${scenes.map((s) => s.visualPrompt).join(' ')}`.toLowerCase();
+        if (fullContentText.includes('priya') || fullContentText.includes('saree')) {
+          basePortrait = path.resolve('./data/storage/images/priya_portrait.jpg');
+        } else if (fullContentText.includes('rhea') || fullContentText.includes('bralette')) {
+          basePortrait = path.resolve('./data/storage/images/rhea_bralette_portrait.jpg');
+        } else if (fullContentText.includes('zara')) {
+          basePortrait = path.resolve('./data/storage/images/zara_portrait.jpg');
+        } else if (fullContentText.includes('elena')) {
+          basePortrait = path.resolve('./data/storage/images/elena_portrait.jpg');
+        } else if (fullContentText.includes('mei')) {
+          basePortrait = path.resolve('./data/storage/images/mei_portrait.jpg');
+        } else if (fullContentText.includes('maya')) {
+          basePortrait = path.resolve('./data/storage/images/maya_portrait.jpg');
+        }
+
+        const sourceImage = imgAsset?.filePath && fs.existsSync(imgAsset.filePath)
+          ? imgAsset.filePath
+          : basePortrait;
+
+        // Prepare multi-angle framed composition for this specific beat
+        const portraitPath = await prepareMultiAngleBeatPortrait(
+          sourceImage,
+          contentItemId,
+          sc.sceneOrder || 1,
+          path.resolve('./data/storage/images')
+        );
+
+        let providerUsed = 'AIDanceEngine/LocalCameraDrift';
+
+        if (hasGpu) {
+          try {
+            const neuralRes = await neuralProvider.generateNeuralDanceVideo({
+              sceneOrder: sc.sceneOrder || 1,
+              durationSec: sc.durationSec || 5,
+              portraitPath,
+              visualPrompt: sc.visualPrompt || 'Bollywood expressive classical fusion dance in rain',
+              outputPath: outFile,
+              gpuServerUrl: config.gpuServerUrl,
+              apiProvider: config.apiProvider,
+              apiKey: config.apiKey,
+            });
+            providerUsed = neuralRes.providerUsed;
+          } catch (e: any) {
+            console.warn(`[Auto-Animate] Neural GPU failed for scene ${sc.id}:`, e.message);
+            gpuErrors.push({ sceneId: sc.id, error: e.message });
+            await danceProvider.generateDanceClip({
+              sceneOrder: sc.sceneOrder || 1,
+              durationSec: sc.durationSec || 9,
+              portraitPath,
+              choreographyType: sc.endingType || 'DANCE',
+              outputPath: outFile,
+            });
+          }
+        } else {
+          await danceProvider.generateDanceClip({
+            sceneOrder: sc.sceneOrder || 1,
+            durationSec: sc.durationSec || 9,
+            portraitPath,
+            choreographyType: sc.endingType || 'DANCE',
+            outputPath: outFile,
+          });
+        }
 
         db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sc.id);
         db.prepare(`
           INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
-          VALUES (?, ?, ?, 'SCENE_VIDEO', 'AIDanceEngine/Auto', ?, 'video/mp4')
-        `).run(userId, contentItemId, sc.id, outFile);
+          VALUES (?, ?, ?, 'SCENE_VIDEO', ?, ?, 'video/mp4')
+        `).run(userId, contentItemId, sc.id, providerUsed, outFile);
 
-        results.push({ sceneId: sc.id, filePath: outFile });
+        results.push({ sceneId: sc.id, filePath: outFile, providerUsed });
       }
 
-      res.status(200).json({ ok: true, count: results.length, results });
+      if (gpuErrors.length > 0) {
+        return res.status(200).json({
+          ok: false,
+          count: results.length,
+          results,
+          hasGpu,
+          isGpuOffline: true,
+          error: gpuErrors[0].error,
+          fallbackNotice: 'Rendered Studio 2.5D Cinematic Master with smooth face-anchored camera motion as automatic fallback.',
+          gpuErrors,
+        });
+      }
+
+      res.status(200).json({
+        ok: true,
+        count: results.length,
+        results,
+        hasGpu,
+        notice: hasGpu
+          ? '✓ Generated authentic AI neural dance videos via Kaggle GPU!'
+          : '✓ Generated 2.5D camera drift previews. Connect Free Kaggle GPU for genuine physical dance moves and hand gestures.',
+      });
     } catch (err: any) {
       console.error('Auto animate all error:', err);
       res.status(500).json({ error: err.message || 'Failed to auto-animate all scenes' });
@@ -702,6 +1268,44 @@ export function createContentEngineRouter(db: DB): Router {
     });
     res.json({ ok: true });
   });
+
+  const testHealthHandler = async (req: Request, res: Response) => {
+    const queryUrl = (req.query.url as string) || (req.body?.gpuServerUrl as string);
+    const config = getNeuralConfig();
+    const targetUrl = queryUrl?.trim() || config.gpuServerUrl;
+
+    if (!targetUrl) {
+      return res.json({ connected: false, message: 'No Google Colab / GPU worker URL configured' });
+    }
+    const cleanUrl = targetUrl.replace(/\/+$/, '');
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      const resp = await fetch(`${cleanUrl}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        return res.json({
+          connected: false,
+          statusCode: resp.status,
+          message: formatHumanReadableGpuError(resp.status, errText, cleanUrl),
+        });
+      }
+      const data = await resp.json();
+      res.json({ connected: true, data });
+    } catch (err: any) {
+      const isTimeout = err.name === 'AbortError';
+      const msg = isTimeout
+        ? `Connection to GPU server timed out after 6s (${cleanUrl}). The Colab instance might be sleeping or busy.`
+        : `Could not reach GPU server at ${cleanUrl}: ${err.message || 'Network error'}. Is Google Colab running?`;
+      res.json({ connected: false, message: msg });
+    }
+  };
+
+  router.get('/settings/neural-dance-health', testHealthHandler);
+  router.post('/settings/neural-dance-health', testHealthHandler);
+
+
 
   // Neural Diffusion Video Generation (MimicMotion / LivePortrait / Cloud GPU)
   router.post('/content/:id/scenes/:sceneId/neural-dance-generate', async (req: Request, res: Response) => {
@@ -750,6 +1354,47 @@ export function createContentEngineRouter(db: DB): Router {
     }
   });
 
+  // LivePortrait Facial Expression & Head Motion Generator for Scene Beat
+  router.post('/content/:id/scenes/:sceneId/liveportrait-generate', async (req: Request, res: Response) => {
+    try {
+      const contentItemId = Number(req.params.id);
+      const sceneId = Number(req.params.sceneId);
+      const userId = uid(req);
+
+      const scene = db.prepare('SELECT * FROM scenes WHERE id=?').get(sceneId) as any;
+      if (!scene) return res.status(404).json({ error: 'Scene not found' });
+
+      const targetDir = path.resolve('./data/storage/videos');
+      fs.mkdirSync(targetDir, { recursive: true });
+      const outFile = path.join(targetDir, `liveportrait_clip_${contentItemId}_${sceneId}_${Date.now()}.mp4`);
+
+      const imgAsset = (db.prepare("SELECT * FROM assets WHERE contentItemId=? AND type='IMAGE' AND sceneId=? ORDER BY id DESC").get(contentItemId, sceneId)
+        || db.prepare("SELECT * FROM assets WHERE contentItemId=? AND type='IMAGE' ORDER BY id DESC").get(contentItemId)) as any;
+      const portraitPath = imgAsset?.filePath && fs.existsSync(imgAsset.filePath)
+        ? imgAsset.filePath
+        : path.resolve('./data/storage/images/priya_portrait.jpg');
+
+      const animator = new LivePortraitFaceAnimatorProvider();
+      await animator.animateFace({
+        sourceImagePath: portraitPath,
+        motionPreset: scene.sceneOrder === 1 ? 'dramatic_intro' : 'natural_speaking',
+        durationSec: scene.durationSec || 5,
+        outputVideoPath: outFile,
+      });
+
+      db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sceneId);
+      db.prepare(`
+        INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
+        VALUES (?, ?, ?, 'SCENE_VIDEO', 'LivePortrait', ?, 'video/mp4')
+      `).run(userId, contentItemId, sceneId, outFile);
+
+      res.status(200).json({ ok: true, filePath: outFile, providerUsed: 'LivePortrait Expression Engine' });
+    } catch (err: any) {
+      console.error('LivePortrait generation error:', err);
+      res.status(500).json({ error: err.message || 'Failed to generate facial animation' });
+    }
+  });
+
   // Render Full Vertical 9:16 Video
   router.post('/content/:id/render', async (req: Request, res: Response) => {
     try {
@@ -775,15 +1420,23 @@ export function createContentEngineRouter(db: DB): Router {
       const vidDir = path.join(baseStorage, 'videos');
       [imgDir, audioDir, subDir, vidDir].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
-      // 1. Generate Voiceover Narration for each scene & concatenate full audio
-      const fullNarration = scenes.map((s) => s.narration).join('. ');
-      const mainAudioFile = path.join(audioDir, `narration_${id}_${Date.now()}.mp3`);
-      const { filePath: audioPath } = await tts.synthesize(fullNarration, 'Samantha', mainAudioFile);
+      // 1. Audio Track: Pure Music or Voiceover Narration
+      const audioMode = (req.body?.audioMode as string) || (req.query?.audioMode as string) || 'music_only';
+      let audioPath = '';
 
-      db.prepare(`
-        INSERT INTO assets(ownerId, contentItemId, type, provider, prompt, filePath, mimeType)
-        VALUES (?, ?, 'AUDIO', 'LocalTTS', ?, ?, 'audio/mpeg')
-      `).run(userId, id, fullNarration, audioPath);
+      if (audioMode !== 'music_only') {
+        const fullNarration = scenes.map((s) => s.narration).filter(Boolean).join('. ');
+        if (fullNarration.trim()) {
+          const mainAudioFile = path.join(audioDir, `narration_${id}_${Date.now()}.mp3`);
+          const { filePath } = await tts.synthesize(fullNarration, 'Samantha', mainAudioFile);
+          audioPath = filePath;
+
+          db.prepare(`
+            INSERT INTO assets(ownerId, contentItemId, type, provider, prompt, filePath, mimeType)
+            VALUES (?, ?, 'AUDIO', 'LocalTTS', ?, ?, 'audio/mpeg')
+          `).run(userId, id, fullNarration, audioPath);
+        }
+      }
 
       // 2. Generate Scene Images or Use Moving Dance Video Clips
       const renderedScenes: Array<{ imagePath?: string; videoClipPath?: string; narration: string; durationSec: number }> = [];
@@ -808,10 +1461,12 @@ export function createContentEngineRouter(db: DB): Router {
       }
 
       if (!characterPortraitPath) {
-        if (fullContentText.includes('bralette') || fullContentText.includes('backless') || fullContentText.includes('monsoon') || fullContentText.includes('rhea')) {
-          characterPortraitPath = path.join(imgDir, 'rhea_bralette_portrait.jpg');
+        if (fullContentText.includes('zara')) {
+          characterPortraitPath = path.join(imgDir, 'zara_portrait.jpg');
         } else if (fullContentText.includes('priya') || fullContentText.includes('saree')) {
           characterPortraitPath = path.join(imgDir, 'priya_portrait.jpg');
+        } else if (fullContentText.includes('rhea') || fullContentText.includes('bralette') || fullContentText.includes('backless')) {
+          characterPortraitPath = path.join(imgDir, 'rhea_bralette_portrait.jpg');
         } else if (fullContentText.includes('elena') || fullContentText.includes('flamenco')) {
           characterPortraitPath = path.join(imgDir, 'elena_portrait.jpg');
         } else if (fullContentText.includes('mei') || fullContentText.includes('k-pop')) {
@@ -822,34 +1477,26 @@ export function createContentEngineRouter(db: DB): Router {
           characterPortraitPath = path.join(imgDir, 'aria_portrait.jpg');
         } else if (fullContentText.includes('amara')) {
           characterPortraitPath = path.join(imgDir, 'amara_portrait.jpg');
-        } else if (fullContentText.includes('zara')) {
+        } else {
           characterPortraitPath = path.join(imgDir, 'zara_portrait.jpg');
         }
       }
 
-      // Multi-angle choreography progression across 5 scene beats
-      const getScenePortraitPath = (sceneOrder: number): string | undefined => {
-        if (fullContentText.includes('bralette') || fullContentText.includes('backless') || fullContentText.includes('monsoon') || fullContentText.includes('rhea')) {
-          const poses = [
-            path.join(imgDir, 'rhea_bralette_portrait.jpg'),
-            path.join(imgDir, 'monsoon_rain_portrait.jpg'),
-            path.join(imgDir, 'rhea_backless_portrait.jpg'),
-            path.join(imgDir, 'custom_portrait_1790843021970.png'),
-            path.join(imgDir, 'rhea_bralette_portrait.jpg'),
-          ];
-          const chosen = poses[(sceneOrder - 1) % poses.length];
-          if (fs.existsSync(chosen)) return chosen;
-        }
+      // Multi-angle choreography progression across 5 scene beats (strictly maintaining character facial & costume consistency)
+      const getScenePortraitPath = (_sceneOrder: number): string | undefined => {
         return characterPortraitPath;
       };
 
       for (const sc of scenes) {
         const sceneVideoAsset = db.prepare("SELECT * FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").get(id, sc.id) as any;
+        const refSliceAsset = db.prepare("SELECT * FROM assets WHERE contentItemId=? AND sceneId=? AND type='REFERENCE_SLICE' ORDER BY id DESC").get(id, sc.id) as any;
         let videoClipPath: string | undefined;
         let imgPath: string | undefined;
 
         if (sceneVideoAsset && fs.existsSync(sceneVideoAsset.filePath)) {
           videoClipPath = sceneVideoAsset.filePath;
+        } else if (refSliceAsset && fs.existsSync(refSliceAsset.filePath)) {
+          videoClipPath = refSliceAsset.filePath;
         } else {
           const sceneImgFile = path.join(imgDir, `scene_${id}_${sc.sceneOrder}_${Date.now()}.png`);
           const scenePortrait = getScenePortraitPath(sc.sceneOrder);
@@ -889,9 +1536,14 @@ export function createContentEngineRouter(db: DB): Router {
 
       // 4. Render Final 9:16 Video with FFmpeg
       const videoOutFile = path.join(vidDir, `short_${id}_master.mp4`);
+      const musicAsset = db.prepare("SELECT * FROM assets WHERE contentItemId=? AND type='MUSIC' ORDER BY id DESC").get(id) as any;
+      const customMusicPath = musicAsset?.filePath && fs.existsSync(musicAsset.filePath) ? musicAsset.filePath : undefined;
+
       const { filePath: finalVideoPath, durationSec: totalDuration } = await videoProvider.renderShort({
         scenes: renderedScenes,
         audioTrackPath: audioPath,
+        musicTrackPath: customMusicPath,
+        audioMode: audioMode as any,
         subtitlesSrtPath: srtFile,
         outputPath: videoOutFile,
         title: item.title,

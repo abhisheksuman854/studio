@@ -1,0 +1,17 @@
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+pycloudflared>=0.2.0
+nest-asyncio>=1.6.0
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+diffusers>=0.27.0
+transformers>=4.38.0
+accelerate>=0.28.0
+imageio>=2.34.0
+imageio[ffmpeg]>=2.34.0
+opencv-python>=4.9.0
+Pillow>=10.2.0
+requests>=2.31.0

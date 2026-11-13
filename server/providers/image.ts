@@ -124,52 +124,17 @@ export class LocalImageProvider implements ImageProvider {
   <rect width="1080" height="1920" fill="#070b14" />
 
   ${resolvedPortraitDataUri ? `
-    <!-- Full-Bleed 1080x1920 Photorealistic Dancer Visual -->
+    <!-- Full-Bleed 1080x1920 Photorealistic Dancer Visual (Zero baked-in text or borders) -->
     <image href="${resolvedPortraitDataUri}" x="0" y="0" width="1080" height="1920" preserveAspectRatio="xMidYMid slice" />
   ` : `
-    <!-- Fallback Theatrical Gradient Canvas -->
+    <!-- Theatrical Stage Atmosphere -->
     <rect width="1080" height="1920" fill="#090d16" />
     <circle cx="540" cy="800" r="450" fill="url(#stageGlow)" />
   `}
 
-  <!-- Atmospheric Lighting & Dark Cinematic Vignettes -->
-  <rect width="1080" height="500" fill="url(#topVignette)" />
-  <rect y="1000" width="1080" height="920" fill="url(#bottomVignette)" />
-
-  <!-- Theatrical Rim Highlight Border -->
-  <rect x="20" y="20" width="1040" height="1880" rx="36" fill="none" stroke="url(#goldGrad)" stroke-width="2" stroke-opacity="0.4" />
-
-  <!-- Top Floating Glassmorphism Brand Badge -->
-  <g transform="translate(540, 110)">
-    <rect x="-240" y="-30" width="480" height="60" rx="30" fill="#0a0f1d" fill-opacity="0.85" stroke="#f59e0b" stroke-width="1.5" filter="url(#glowFilter)" />
-    <text x="0" y="8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="800" fill="#fbbf24" text-anchor="middle" letter-spacing="4">
-      ✦ AURAVO STUDIO · ${escapeXml(overlayText)}
-    </text>
-  </g>
-
-  <!-- Bottom Native Reels / Shorts Subtitle Overlay -->
-  ${narrationLines.length > 0 ? `
-    <g transform="translate(60, 1540)">
-      <rect width="960" height="${Math.max(160, narrationLines.length * 56 + 50)}" rx="28" fill="#030712" fill-opacity="0.88" stroke="#f59e0b" stroke-width="2" stroke-opacity="0.75" />
-      <rect x="40" y="22" width="140" height="28" rx="14" fill="url(#accentPill)" />
-      <text x="110" y="41" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="2">
-        NARRATION
-      </text>
-      ${narrationLines.map((line, idx) => `
-        <text x="40" y="${88 + idx * 52}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="32" font-weight="700" fill="#ffffff">
-          "${escapeXml(line)}"
-        </text>
-      `).join('')}
-    </g>
-  ` : ''}
-
-  <!-- Bottom Floating Audio Wave Indicator -->
-  <g transform="translate(540, 1850)">
-    <rect x="-140" y="-18" width="280" height="36" rx="18" fill="#1e293b" fill-opacity="0.9" />
-    <text x="0" y="5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="700" fill="#94a3b8" text-anchor="middle" letter-spacing="3">
-      1080×1920 • 9:16 VERTICAL
-    </text>
-  </g>
+  <!-- Subtle Atmospheric Lighting Vignettes for Cinematic Mood -->
+  <rect width="1080" height="300" fill="url(#topVignette)" opacity="0.4" />
+  <rect y="1620" width="1080" height="300" fill="url(#bottomVignette)" opacity="0.5" />
 </svg>
     `.trim();
 

@@ -45,6 +45,8 @@ export class FFmpegVideoProvider implements VideoProvider {
     subtitlesSrtPath: string;
     outputPath: string;
     title?: string;
+    musicTrackPath?: string;
+    audioMode?: 'music_only' | 'narration_and_music' | 'narration_only';
   }): Promise<{ filePath: string; durationSec: number }> {
     const targetDir = path.resolve('./data/storage/videos');
     fs.mkdirSync(targetDir, { recursive: true });
@@ -55,20 +57,20 @@ export class FFmpegVideoProvider implements VideoProvider {
     const tempClips: string[] = [];
     const concatListPath = path.join(targetDir, `concat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.txt`);
 
-    // Motion presets with guaranteed continuous on-frame camera movement
-    const getMotionFilter = (idx: number, frames: number): string => {
-      const f = Math.max(30, frames);
+    // Motion presets with guaranteed 9:16 aspect-ratio preservation and buttery-smooth continuous camera movement
+    const getMotionFilter = (idx: number, durationSec: number): string => {
+      const dur = Math.max(1, durationSec);
       const motionPatterns = [
-        // Scene 1: Dramatic Push-In / Hook Zoom
-        `scale=2160:3840,zoompan=z='1.0+0.30*(on/${f})':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':s=1080x1920:d=1`,
-        // Scene 2: Seductive Slow Vertical Tilt-Down / Saree & Bralette Tracking
-        `scale=2160:3840,zoompan=z='1.15':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2+250*(on/${f})':s=1080x1920:d=1`,
-        // Scene 3: Dynamic Choreography Rhythmic Pulse & Drift
-        `scale=2160:3840,zoompan=z='1.08+0.08*sin(2*3.14159*on/30)':x='(iw-iw/zoom)/2+60*sin(2*3.14159*on/60)':y='(ih-ih/zoom)/2':s=1080x1920:d=1`,
-        // Scene 4: Climax Pull-out Reveal into Stage Backlight Halo
-        `scale=2160:3840,zoompan=z='1.25-0.20*(on/${f})':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':s=1080x1920:d=1`,
-        // Scene 5: Cinematic Diagonal Glide & Soft Outro
-        `scale=2160:3840,zoompan=z='1.05+0.18*(on/${f})':x='(iw-iw/zoom)/2+100*(on/${f})':y='(ih-ih/zoom)/2':s=1080x1920:d=1`
+        // Scene 1: Smooth cinematic push-in (zoom 1.0 -> 1.14) anchored on eye-line
+        `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=eval=frame:w='1080*(1+0.14*t/${dur})':h='1920*(1+0.14*t/${dur})':flags=bicubic,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.22,fps=30`,
+        // Scene 2: Gentle vertical pedestal tracking downwards (reveals dance attire & mudras)
+        `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1200:2133,crop=1080:1920:(in_w-1080)/2:'(in_h-1920)*(0.15+0.15*t/${dur})',fps=30`,
+        // Scene 3: Smooth continuous lateral camera glide across stage
+        `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1200:2133,crop=1080:1920:'(in_w-1080)*(0.25+0.50*t/${dur})':(in_h-1920)*0.22,fps=30`,
+        // Scene 4: Climax Pull-Out - Dramatic smooth pull-out revealing the full stage
+        `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=eval=frame:w='1080*(1.15-0.15*t/${dur})':h='1920*(1.15-0.15*t/${dur})':flags=bicubic,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.24,fps=30`,
+        // Scene 5: Final Graceful Bow - Smooth diagonal glide with gentle ease-in
+        `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1220:2168,crop=1080:1920:'(in_w-1080)*(0.60-0.25*t/${dur})':'(in_h-1920)*(0.20+0.10*t/${dur})',fps=30`
       ];
       return motionPatterns[idx % motionPatterns.length];
     };
@@ -86,25 +88,24 @@ export class FFmpegVideoProvider implements VideoProvider {
             '-stream_loop', '-1',
             '-i', path.resolve(sc.videoClipPath),
             '-t', String(sc.durationSec),
-            '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p',
+            '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)/2,fps=30,format=yuv420p',
             '-c:v', 'libx264',
-            '-preset', 'ultrafast',
+            '-preset', 'fast',
             '-an',
             '-r', '30',
             clipFile
           ], { maxBuffer: 50 * 1024 * 1024 });
         } else if (sc.imagePath && fs.existsSync(sc.imagePath)) {
-          const frames = Math.max(30, Math.round(sc.durationSec * 30));
-          const motionVf = `${getMotionFilter(i, frames)},format=yuv420p`;
+          const motionVf = `${getMotionFilter(i, sc.durationSec)},format=yuv420p`;
 
           await execFileAsync('ffmpeg', [
             '-y',
             '-loop', '1',
+            '-t', String(sc.durationSec),
             '-i', path.resolve(sc.imagePath),
             '-vf', motionVf,
             '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-frames:v', String(frames),
+            '-preset', 'fast',
             '-r', '30',
             clipFile
           ], { maxBuffer: 50 * 1024 * 1024 });
@@ -121,9 +122,18 @@ export class FFmpegVideoProvider implements VideoProvider {
       fs.writeFileSync(concatListPath, concatContent, 'utf8');
 
       // 3. Assemble final video with audio track + rhythmic background dance beat
-      const hasAudio = fs.existsSync(options.audioTrackPath) && fs.statSync(options.audioTrackPath).size > 0;
-      const bgmPath = path.resolve('./data/storage/audio/bollywood_monsoon_beat.mp3');
-      const hasBgm = fs.existsSync(bgmPath);
+      const hasAudio = options.audioTrackPath && fs.existsSync(options.audioTrackPath) && fs.statSync(options.audioTrackPath).size > 0;
+      const audioDir = path.resolve('./data/storage/audio');
+      const candidateBgm = (options.musicTrackPath && fs.existsSync(options.musicTrackPath))
+        ? options.musicTrackPath
+        : [
+            path.join(audioDir, 'bollywood_monsoon_beat.mp3'),
+            path.join(audioDir, 'hindi_music.mp3'),
+            path.join(audioDir, 'sensual_bgm.mp3'),
+            path.join(audioDir, 'bgm.mp3'),
+          ].find((p) => fs.existsSync(p));
+      const hasBgm = !!candidateBgm;
+      const isPureMusicMode = options.audioMode === 'music_only' || (!hasAudio && hasBgm);
 
       const ffmpegArgs: string[] = [
         '-y',
@@ -132,9 +142,20 @@ export class FFmpegVideoProvider implements VideoProvider {
         '-i', concatListPath,
       ];
 
-      if (hasAudio && hasBgm) {
+      if (isPureMusicMode && candidateBgm) {
+        // Pure Song Music Mode: Full fidelity Hindi music track, zero narration voiceover
+        ffmpegArgs.push('-stream_loop', '-1', '-i', candidateBgm);
+        ffmpegArgs.push(
+          '-map', '0:v',
+          '-map', '1:a',
+          '-c:a', 'aac',
+          '-b:a', '256k',
+          '-af', 'volume=1.0',
+          '-shortest'
+        );
+      } else if (hasAudio && hasBgm && candidateBgm) {
         ffmpegArgs.push('-i', path.resolve(options.audioTrackPath));
-        ffmpegArgs.push('-stream_loop', '-1', '-i', bgmPath);
+        ffmpegArgs.push('-stream_loop', '-1', '-i', candidateBgm);
         ffmpegArgs.push(
           '-filter_complex',
           '[1:a]volume=1.25[voice];[2:a]volume=0.32[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]',

@@ -99,5 +99,7 @@ export interface VideoProvider {
     subtitlesSrtPath: string;
     outputPath: string;
     title?: string;
+    musicTrackPath?: string;
+    audioMode?: 'music_only' | 'narration_and_music' | 'narration_only';
   }): Promise<{ filePath: string; durationSec: number }>;
 }

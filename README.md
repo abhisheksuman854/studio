@@ -145,7 +145,7 @@ def get_diffusion_pipeline():
         print("[Neural Engine] Loading Stable Video Diffusion XT onto GPU...")
         from diffusers import StableVideoDiffusionPipeline
         svd_pipeline = StableVideoDiffusionPipeline.from_pretrained(
-            "stabilityai/stable-video-diffusion-img2vid-xt-1-1",
+            "stabilityai/stable-video-diffusion-img2vid-xt",
             torch_dtype=torch.float16,
             variant="fp16"
         )

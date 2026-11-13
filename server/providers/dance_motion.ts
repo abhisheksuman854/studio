@@ -45,22 +45,24 @@ export class AIDanceMotionProvider {
       // Fallback to local procedural dance motion synthesis
     }
 
-    // Choreography beat motion patterns with dynamic lighting & camera tracking
+    // 5 High-precision, buttery-smooth 30fps camera movements anchored on character eye-line
+    // Strict 9:16 aspect ratio preservation with ZERO facial distortion
+    const dur = Math.max(1, durationSec);
     const motionFilters = [
-      // Beat 1: Intro Hook - Intense eye contact, slow push-in with golden rain spotlight
-      `scale=2160:3840,zoompan=z='1.0+0.30*(on/${totalFrames})':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':s=1080x1920:d=1,eq=contrast=1.08:brightness=0.02:saturation=1.12`,
+      // Beat 1: Intro Hook - Smooth cinematic push-in anchored on eyes
+      `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=eval=frame:w='1080*(1+0.14*t/${dur})':h='1920*(1+0.14*t/${dur})':flags=bicubic,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.22,fps=30,eq=contrast=1.05:saturation=1.08`,
 
-      // Beat 2: Mudra & Torso Wave - Seductive vertical tilt down along the flowing saree
-      `scale=2160:3840,zoompan=z='1.16':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2+280*(on/${totalFrames})':s=1080x1920:d=1,eq=contrast=1.12:brightness=0.01:saturation=1.15`,
+      // Beat 2: Mudra & Torso Flow - Gentle vertical pedestal tracking downwards (reveals dance attire & mudras)
+      `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1200:2133,crop=1080:1920:(in_w-1080)/2:'(in_h-1920)*(0.15+0.15*t/${dur})',fps=30,eq=contrast=1.06:saturation=1.10`,
 
-      // Beat 3: Backless Turn & Hip Snap - Dynamic rhythmic pulse synced to choreography beats
-      `scale=2160:3840,zoompan=z='1.10+0.07*sin(2*3.14159*on/30)':x='(iw-iw/zoom)/2+50*sin(2*3.14159*on/60)':y='(ih-ih/zoom)/2':s=1080x1920:d=1,eq=contrast=1.15:saturation=1.18`,
+      // Beat 3: Rhythmic Stage Glide - Smooth continuous lateral camera glide across stage
+      `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1200:2133,crop=1080:1920:'(in_w-1080)*(0.25+0.50*t/${dur})':(in_h-1920)*0.22,fps=30,eq=contrast=1.08:saturation=1.12`,
 
-      // Beat 4: Monsoon Rain Climax Spin - Dynamic pull-out with dramatic backlight flare
-      `scale=2160:3840,zoompan=z='1.28-0.24*(on/${totalFrames})':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':s=1080x1920:d=1,eq=contrast=1.10:brightness=0.03:saturation=1.10`,
+      // Beat 4: Climax Pull-Out - Dramatic smooth pull-out revealing the stage ambiance
+      `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=eval=frame:w='1080*(1.15-0.15*t/${dur})':h='1920*(1.15-0.15*t/${dur})':flags=bicubic,crop=1080:1920:(in_w-1080)/2:(in_h-1920)*0.24,fps=30,eq=contrast=1.06:saturation=1.08`,
 
-      // Beat 5: Final Power Strike - Diagonal glide into power pose freeze
-      `scale=2160:3840,zoompan=z='1.05+0.16*(on/${totalFrames})':x='(iw-iw/zoom)/2+120*(on/${totalFrames})':y='(ih-ih/zoom)/2':s=1080x1920:d=1,eq=contrast=1.05:saturation=1.08`
+      // Beat 5: Final Graceful Bow - Smooth diagonal glide with gentle ease-in
+      `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,scale=1220:2168,crop=1080:1920:'(in_w-1080)*(0.60-0.25*t/${dur})':'(in_h-1920)*(0.20+0.10*t/${dur})',fps=30,eq=contrast=1.05:saturation=1.06`
     ];
 
     const chosenFilter = motionFilters[(sceneOrder - 1) % motionFilters.length];
@@ -69,11 +71,12 @@ export class AIDanceMotionProvider {
       if (isVideo) {
         await execFileAsync('ffmpeg', [
           '-y',
+          '-stream_loop', '-1',
           '-i', absPortrait,
           '-t', String(durationSec),
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p',
+          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(in_w-1080)/2:(in_h-1920)/2,fps=30,format=yuv420p',
           '-c:v', 'libx264',
-          '-preset', 'ultrafast',
+          '-preset', 'fast',
           '-an',
           '-r', '30',
           outputPath
@@ -82,11 +85,11 @@ export class AIDanceMotionProvider {
         await execFileAsync('ffmpeg', [
           '-y',
           '-loop', '1',
+          '-t', String(durationSec),
           '-i', absPortrait,
           '-vf', `${chosenFilter},format=yuv420p`,
           '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-frames:v', String(totalFrames),
+          '-preset', 'fast',
           '-r', '30',
           outputPath
         ], { maxBuffer: 50 * 1024 * 1024 });

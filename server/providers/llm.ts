@@ -1,6 +1,13 @@
 import type { BrandContext, CharacterContext, GeneratedStory, GeneratedStoryScene, IdeaItem, LLMProvider } from './types.js';
+import type { RAGEngine } from './rag_engine.js';
 
 export class LocalLLMProvider implements LLMProvider {
+  private ragEngine?: RAGEngine;
+
+  constructor(ragEngine?: RAGEngine) {
+    this.ragEngine = ragEngine;
+  }
+
   async generateIdeas(brand: BrandContext, count = 5): Promise<IdeaItem[]> {
     const topics = brand.preferredTopics.length > 0
       ? brand.preferredTopics
@@ -78,6 +85,27 @@ export class LocalLLMProvider implements LLMProvider {
     const tone = brand.tone || 'elegant, confident, moody, sensual but classy';
     const visualStyle = brand.visualStyle || 'Dramatic stage lighting, deep shadows, rich textures, 9:16 vertical composition';
 
+    // Retrieve authentic dance mudras and choreography patterns via RAG if available
+    let retrievedMudraText = 'fluid hand choreography and expressive eye contact';
+    let retrievedChoreoMovement = 'dynamic, high-precision dance movement, trailing motion blur';
+    let retrievedHookText = 'They say the stage only reveals its true secret when the final spotlight cuts through the silence.';
+
+    if (this.ragEngine) {
+      const query = `${topic} ${brand.niche || ''} ${character?.personality || ''} ${character?.appearance || ''}`;
+      const mudraResults = this.ragEngine.search(query, { category: 'CHOREOGRAPHY', limit: 2 });
+      if (mudraResults.length > 0) {
+        retrievedMudraText = `${mudraResults[0].item.title} (${mudraResults[0].item.content.split('.')[0]})`;
+        if (mudraResults.length > 1) {
+          retrievedChoreoMovement = `${mudraResults[1].item.title}, executing ${mudraResults[1].item.content.split('.')[0]}`;
+        }
+      }
+
+      const hookResults = this.ragEngine.search(query, { category: 'VIRAL_HOOKS', limit: 1 });
+      if (hookResults.length > 0) {
+        retrievedHookText = `${hookResults[0].item.content.split('.')[0]}.`;
+      }
+    }
+
     const charDesc = character
       ? `${character.name}, a solo dancer with ${character.appearance || 'striking sculpted features and magnetic gaze'}, wearing ${character.clothingStyle || 'a midnight crimson silk gown'}, ${character.personality || 'confident and graceful'}`
       : `a world-class solo dancer in elegant theatrical stage attire`;
@@ -88,7 +116,7 @@ export class LocalLLMProvider implements LLMProvider {
       {
         sceneOrder: 1,
         durationSec: 5,
-        narration: `They say the stage only reveals its true secret when the final spotlight cuts through the silence.`,
+        narration: retrievedHookText,
         visualPrompt: `Vertical 9:16, dark theater stage, single intense overhead golden spotlight cutting through atmospheric haze, ${charDesc} standing center stage in silhouette, cinematic contrast, 8k resolution, dramatic ${tone} aesthetic.`,
         voiceDirection: character?.voiceStyle || 'Intriguing, calm, low register, confident and magnetic',
         soundEffects: 'Distorted vinyl crackle, distant low bass hum, single stage light switch click',
@@ -98,7 +126,7 @@ export class LocalLLMProvider implements LLMProvider {
         sceneOrder: 2,
         durationSec: 10,
         narration: `Every step was calculated. Every rhythm counted in the dark. But tonight, the tempo was completely different.`,
-        visualPrompt: `Vertical 9:16, close-up shot of ${character?.name || 'the dancer'}'s intense gaze and fluid hand choreography, ${character?.clothingStyle || 'luxurious velvet and liquid silk'} catching dramatic rim lighting, moody shadows, ${visualStyle}.`,
+        visualPrompt: `Vertical 9:16, close-up shot of ${character?.name || 'the dancer'}'s intense gaze and hands executing ${retrievedMudraText}, ${character?.clothingStyle || 'luxurious velvet and liquid silk'} catching dramatic rim lighting, moody shadows, ${visualStyle}.`,
         voiceDirection: character?.voiceStyle || 'Building pace, steady, sophisticated',
         soundEffects: 'Soft stage floor tap resonating, silk cloth rustle',
         musicDirection: 'Syncopated acoustic percussion entering softly',
@@ -107,7 +135,7 @@ export class LocalLLMProvider implements LLMProvider {
         sceneOrder: 3,
         durationSec: 12,
         narration: `As the music accelerates, the boundaries between the dancer and the stage vanish into pure choreography.`,
-        visualPrompt: `Vertical 9:16, full-body shot of ${character?.name || 'the dancer'} executing dynamic, high-precision dance movement, trailing motion blur, glowing ambient chandeliers, theatrical depth of field, ${tone}.`,
+        visualPrompt: `Vertical 9:16, full-body shot of ${character?.name || 'the dancer'} executing dynamic dance choreography with ${retrievedChoreoMovement}, glowing ambient chandeliers, theatrical depth of field, ${tone}.`,
         voiceDirection: 'Energetic, elevated intensity, dramatic cadence',
         soundEffects: 'Crescendo whoosh, sharp brass accent hit',
         musicDirection: 'Full orchestral crescendo with modern rhythm beats',

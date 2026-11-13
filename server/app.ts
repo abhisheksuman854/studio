@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { DB } from './db.js';
 import { crud, uid } from './crud.js';
 import { createContentEngineRouter } from './content_engine.js';
+import { createJobsRouter } from './jobs.js';
 
 const hash = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
 const hashPw = (pw: string) => { const s = crypto.randomBytes(16).toString('hex'); return s + ':' + crypto.scryptSync(pw, s, 64).toString('hex'); };
@@ -52,6 +53,7 @@ export function createApp(db: DB, opts: { secureCookie?: boolean } = {}) {
   app.post('/api/auth/logout', (req, res) => { const t = /sid=([a-f0-9]+)/.exec(req.headers.cookie ?? '')?.[1]; if (t) db.prepare('DELETE FROM sessions WHERE tokenHash=?').run(hash(t)); res.json({ ok: true }); });
   app.get('/api/auth/me', auth, (req, res) => res.json(db.prepare('SELECT id,email FROM users WHERE id=?').get(uid(req))));
   app.get('/api/health', (_q, res) => execFile('ffmpeg', ['-version'], (err, out) => res.json({ ok: true, ffmpeg: err ? null : out.split('\n')[0] })));
+  app.use('/api/media', express.static(path.resolve('./data/storage')));
 
   const api = express.Router(); api.use(auth);
   api.use('/audience-profiles', crud(db, { table: 'audience_profiles', json: ['interests', 'avoid'], schema: z.object({ name: z.string().min(1).max(100), ageMin: num, ageMax: num, country: str, language: str, interests: list, preferredDurationSec: str, tone: str, avoid: list }) }));
@@ -71,6 +73,7 @@ export function createApp(db: DB, opts: { secureCookie?: boolean } = {}) {
     check: (d, u, x) => x.brandId != null && !d.prepare('SELECT 1 FROM brands WHERE id=? AND ownerId=?').get(x.brandId, u) ? 'brand not found' : null,
   }));
   api.use('/', createContentEngineRouter(db));
+  api.use('/', createJobsRouter(db));
   app.use('/api', api);
   app.use('/api', (_q, res) => res.status(404).json({ error: 'not found' }));
 
