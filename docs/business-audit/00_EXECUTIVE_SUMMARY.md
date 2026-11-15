@@ -3,6 +3,7 @@
 **Project**: Auravo Studio (formerly Faceless Content Factory / AI Video Engine)  
 **Auditor**: Principal Startup Product Strategist, SaaS Architect & Profitability Auditor  
 **Audit Date**: November 2026  
+**Commit Inspected**: `b34e9ee` (latest on `main`)  
 **Final Verdict**: **PIVOT IMMEDIATELY — High Technical Potential, Fatal Current Niche**  
 
 ---
@@ -13,8 +14,9 @@
 ┌─────────────────────────────────┬────────────────────────────────────────────────────────┐
 │ Strategic Dimension             │ Audit Finding & Executive Decision                     │
 ├─────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ 1. Current Product Status       │ Early-stage prototype; working FFmpeg video engine;    │
-│                                 │ mock AI scripts/scoring; hardcoded single-user lock.   │
+│ 1. Current Product Status       │ Prototype at commit b34e9ee (15/17 tests pass);        │
+│                                 │ working FFmpeg video engine; mock AI scripts/scoring;  │
+│                                 │ single-user registration lock (403 on user 2).         │
 │ 2. Recommended Business Model   │ B2B Micro-SaaS (Recurring monthly subscriptions).      │
 │ 3. Recommended Market Niche     │ Regional Indian (Hindi/Bengali) Financial & Business   │
 │                                 │ Explainer Automation for Advisors, CAs & Educators.    │
@@ -35,18 +37,20 @@
 
 ## 2. Current Product Status: The Truth Behind the Code
 
-An exhaustive inspection of `/Users/abhisheksuman/Documents/GitHub/studio` (Commit `7aa95ce`) reveals a profound divergence between marketing intentions and technical implementation:
+An exhaustive inspection of `/Users/abhisheksuman/Documents/GitHub/studio` at commit `b34e9ee` reveals a profound divergence between marketing intentions and technical implementation:
 
 1. **The Genuine Working Asset**:
    - The FFmpeg video composition engine (`server/providers/video.ts`) is fully functional. It successfully composes 1080x1920 9:16 vertical MP4 video reels with Ken Burns camera pan/zoom filters, audio track mixing (`amix` speech with background music), and timestamped subtitle SRT generation. It runs 100% locally on standard CPUs and costs ₹0 in external APIs.
 2. **The "Fake AI" Bottleneck**:
-   - The script and idea generators (`server/providers/llm.ts`) are **deterministic string templates** using `Math.sin()` and `Math.cos()` formulas rather than real LLM reasoning.
+   - The script and idea generators (`server/providers/llm.ts`) are **deterministic string templates** using `Math.sin()` and `Math.cos()` formulas rather than real LLM reasoning, augmented with local SQLite keyword RAG (`rag_knowledge`).
    - The visual generator (`server/providers/image.ts`) composites static local stock photos into SVG cards using `@resvg/resvg-js`.
-   - The TTS voice generator (`server/providers/tts.ts`) calls the macOS system CLI command `say -v Samantha` or generates audio noise.
+   - The TTS voice generator (`server/providers/tts.ts`) calls the macOS system CLI command `say -v Samantha` or `Lekha` (Hindi), or generates audio noise.
 3. **The Commercial Blocker**:
    - `server/app.ts` (line 41) explicitly restricts registration to a **single user** (`SELECT COUNT(*) FROM users > 0 -> 403`). There is no multi-tenancy, no payment integration (Stripe/Razorpay), and no usage metering.
 4. **The Unviable Niche**:
    - The current codebase is heavily hardcoded around "7 Luxury Dancer Archetypes" (e.g., Priya Desi Siren, Elena Crimson Siren, silk sarees, and seductive stage movements). B2B customers will never pay for this, and YouTube/Meta will flag it under their 2024/2025 "Inauthentic Content" and sensitive content monetization rules.
+5. **Test Suite Reality**:
+   - Across 7 test files and 17 test cases, **15 pass and 2 fail**. The two failures (`phase2_content_engine.test.ts` and `phase3_quality_and_schedule.test.ts`) are caused by a recent regression where `audioMode` default was changed to `'music_only'`, skipping narration audio generation, which causes the Quality Gate to trigger a critical failure on missing narration audio, blocking `/approve` with HTTP 400.
 
 ---
 
@@ -138,4 +142,3 @@ For complete data tables, source code citations, competitor pricing, and mathema
 6. [`06_technical_commercial_readiness.md`](file:///Users/abhisheksuman/Documents/GitHub/studio/docs/business-audit/06_technical_commercial_readiness.md) — Multi-tenancy, asynchronous FFmpeg queues & compliance checklist.
 7. [`07_final_business_recommendation.md`](file:///Users/abhisheksuman/Documents/GitHub/studio/docs/business-audit/07_final_business_recommendation.md) — Direct answers to 10 core questions & faceless customer acquisition playbook.
 8. [`08_ninety_day_execution_roadmap.md`](file:///Users/abhisheksuman/Documents/GitHub/studio/docs/business-audit/08_ninety_day_execution_roadmap.md) — Day-by-day 90-day operational milestones and exit gates.
-

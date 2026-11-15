@@ -8,7 +8,8 @@ import { LocalTTSProvider } from './providers/tts.js';
 import { LocalImageProvider } from './providers/image.js';
 import { FFmpegVideoProvider, generateSrtContent } from './providers/video.js';
 import { QualityGateEngine } from './providers/quality_gate.js';
-import { DANCER_ARCHETYPES } from './content_engine.js';
+import { DANCER_ARCHETYPES, getPersistedAudioMode } from './content_engine.js';
+import { resolveAudioMode } from './providers/types.js';
 
 export type JobStatus =
   | 'QUEUED'
@@ -22,6 +23,88 @@ export type JobStatus =
   | 'COMPLETED'
   | 'FAILED'
   | 'CANCELLED';
+
+export type PublicJobErrorCategory =
+  | 'GENERATION_FAILED'
+  | 'RENDER_FAILED'
+  | 'PROVIDER_UNAVAILABLE'
+  | 'INVALID_INPUT'
+  | 'INTERNAL_ERROR';
+
+/**
+ * Maps raw internal error messages or diagnostic traces to a safe, public error category.
+ * Prevents disclosure of local filesystem paths (/Users/...), FFmpeg stderr, provider traces,
+ * or environment variables in client-facing API responses.
+ */
+export function sanitizeJobError(rawError: string | null | undefined): PublicJobErrorCategory | null {
+  if (!rawError) return null;
+  const trimmed = rawError.trim();
+  if (!trimmed) return null;
+
+  // If already one of the canonical safe categories, return as-is
+  if (
+    trimmed === 'GENERATION_FAILED' ||
+    trimmed === 'RENDER_FAILED' ||
+    trimmed === 'PROVIDER_UNAVAILABLE' ||
+    trimmed === 'INVALID_INPUT' ||
+    trimmed === 'INTERNAL_ERROR'
+  ) {
+    return trimmed;
+  }
+
+  const lower = trimmed.toLowerCase();
+
+  // Classify failure domains safely
+  if (
+    lower.includes('input') ||
+    lower.includes('invalid') ||
+    lower.includes('not found') ||
+    lower.includes('missing') ||
+    lower.includes('empty') ||
+    lower.includes('bad request')
+  ) {
+    return 'INVALID_INPUT';
+  }
+  if (
+    lower.includes('ffmpeg') ||
+    lower.includes('render') ||
+    lower.includes('audio') ||
+    lower.includes('video') ||
+    lower.includes('composition') ||
+    lower.includes('codec') ||
+    lower.includes('concat') ||
+    lower.includes('filter') ||
+    lower.includes('zoompan') ||
+    lower.includes('libx264')
+  ) {
+    return 'RENDER_FAILED';
+  }
+  if (
+    lower.includes('character') ||
+    lower.includes('portrait') ||
+    lower.includes('prompt') ||
+    lower.includes('denoise') ||
+    lower.includes('diffusion') ||
+    lower.includes('sdxl') ||
+    lower.includes('unet') ||
+    lower.includes('vae')
+  ) {
+    return 'GENERATION_FAILED';
+  }
+  if (
+    lower.includes('unreachable') ||
+    lower.includes('econnrefused') ||
+    lower.includes('timeout') ||
+    lower.includes('network') ||
+    lower.includes('gpu worker') ||
+    lower.includes('timed out') ||
+    lower.includes('fetch failed')
+  ) {
+    return 'PROVIDER_UNAVAILABLE';
+  }
+
+  return 'INTERNAL_ERROR';
+}
 
 export interface JobRecord {
   id: string;
@@ -173,7 +256,11 @@ export class JobManager {
         const customMusicPath = musicAsset?.filePath && fs.existsSync(musicAsset.filePath) ? musicAsset.filePath : undefined;
         const currentJob = this.getJob(jobId, ownerId);
         const payload = typeof currentJob?.inputPayload === 'string' ? JSON.parse(currentJob.inputPayload) : currentJob?.inputPayload;
-        const audioMode = audioModeParam || (payload?.audioMode as string) || 'music_only';
+        const resolvedAudio = resolveAudioMode(
+          audioModeParam || payload?.audioMode,
+          getPersistedAudioMode(this.db, contentItemId)
+        );
+        const audioMode = resolvedAudio.mode;
 
         let audioPath = '';
         if (audioMode !== 'music_only') {
@@ -353,6 +440,7 @@ export class JobManager {
           scenes,
           assets,
           history,
+          audioMode,
         });
 
         this.db.prepare(`
@@ -378,10 +466,11 @@ export class JobManager {
         });
       } catch (err: any) {
         console.error(`[Job ${jobId} Failed]:`, err);
+        const safeError = sanitizeJobError(err?.message) || 'INTERNAL_ERROR';
         this.updateProgress(jobId, ownerId, {
           status: 'FAILED',
           currentStage: 'Job failed during execution',
-          error: err.message || 'Unknown pipeline execution failure',
+          error: safeError,
         });
       }
     });
@@ -392,20 +481,26 @@ export function createJobsRouter(db: DB): Router {
   const router = express.Router();
   const manager = new JobManager(db);
 
-  // List recent jobs for authenticated user
+  // List recent jobs for authenticated user (public responses sanitized on read)
   router.get('/jobs', (req: Request, res: Response) => {
     const userId = uid(req);
     const limit = req.query.limit ? Number(req.query.limit) : 20;
-    const jobs = manager.listJobs(userId, limit);
+    const jobs = manager.listJobs(userId, limit).map((j) => ({
+      ...j,
+      error: sanitizeJobError(j.error),
+    }));
     res.json(jobs);
   });
 
-  // Get single job status (polling endpoint)
+  // Get single job status (polling endpoint; public response sanitized on read)
   router.get('/jobs/:id', (req: Request, res: Response) => {
     const userId = uid(req);
     const job = manager.getJob(req.params.id, userId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
-    res.json(job);
+    res.json({
+      ...job,
+      error: sanitizeJobError(job.error),
+    });
   });
 
   // Cancel a running job
@@ -425,7 +520,13 @@ export function createJobsRouter(db: DB): Router {
       const item = db.prepare('SELECT id, title FROM content_items WHERE id=? AND ownerId=?').get(contentItemId, userId) as any;
       if (!item) return res.status(404).json({ error: 'Content item not found' });
 
-      const audioMode = (req.body?.audioMode as string) || 'music_only';
+      const reqAudioMode = req.body?.audioMode;
+      const persistedAudioMode = getPersistedAudioMode(db, contentItemId);
+      const resolvedAudio = resolveAudioMode(reqAudioMode, persistedAudioMode);
+      if (resolvedAudio.error) {
+        return res.status(400).json({ error: resolvedAudio.error });
+      }
+      const audioMode = resolvedAudio.mode;
 
       // Create new job in QUEUED state
       const job = manager.createJob({

@@ -1,5 +1,15 @@
 import { useEffect, useState, useRef, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  GenerationMonitorView,
+  OverviewDashboard,
+  ExperimentGallery,
+  ExperimentDetailModal,
+  BenchmarksView,
+  MotionAndVideoStudioStatus,
+  type ExperimentsPayload,
+  type HistoricalExperiment
+} from './experiments_views';
 
 type Row = Record<string, any>;
 
@@ -955,7 +965,7 @@ function IdeasStudio({ brands }: { brands: Row[] }) {
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
                 <span className={`badge badge-${idea.status.toLowerCase()}`}>{idea.status}</span>
-                <span className="badge badge-score">Pot: {idea.potentialScore}% · Orig: {idea.originalityScore}%</span>
+                <span className="badge badge-score">Pot: {idea.potentialScore !== null && idea.potentialScore !== undefined && idea.potentialScore >= 0 ? `${idea.potentialScore}%` : 'N/A'} · Orig: {idea.originalityScore}%</span>
               </div>
               <h3 style={{ margin: '8px 0', fontSize: 17 }}>{idea.title}</h3>
               <p style={{ color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.45 }}>{idea.premise}</p>
@@ -1869,48 +1879,22 @@ function ScriptStudio({ brands }: { brands: Row[] }) {
                       Paste a YouTube Short/Reel link or upload a dance video. Studio auto-downloads &amp; slices the moves across all 5 beats!
                     </p>
 
-                    <form onSubmit={handleAttachDanceReference} style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                      <input
-                        type="url"
-                        placeholder="https://youtube.com/shorts/... or video link"
-                        value={youtubeDanceUrl}
-                        onChange={(e) => setYoutubeDanceUrl(e.target.value)}
-                        style={{ fontSize: 11, padding: '6px 8px', background: '#090e1a', flex: 1, minWidth: 120 }}
-                        disabled={importingDanceRef}
-                      />
-                      <button
-                        type="submit"
-                        className="btn btn-outline"
-                        style={{ fontSize: 11, padding: '6px 10px', borderColor: '#38bdf8', color: '#38bdf8', background: '#0c2238', whiteSpace: 'nowrap', fontWeight: 600 }}
-                        disabled={importingDanceRef || !youtubeDanceUrl.trim()}
-                      >
-                        {importingDanceRef ? '⏳ Syncing...' : '⚡ Sync'}
-                      </button>
-                    </form>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, background: '#090e1a', padding: '6px 10px', borderRadius: 6 }}>
-                      <span style={{ fontSize: 11, color: referenceVideoUrl ? '#6ee7b7' : '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 170 }} title={referenceVideoName}>
-                        {referenceVideoUrl ? `💃 ${referenceVideoName}` : '📁 Or upload local video'}
-                      </span>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        <label
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, background: '#090e1a', padding: '10px 12px', borderRadius: 6, border: '1px solid #1e293b', marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>
+                          📹 Reference video ingestion (disabled)
+                        </span>
+                        <button
+                          type="button"
                           className="btn btn-outline"
-                          style={{ fontSize: 10, padding: '3px 8px', background: '#1e293b', color: '#6ee7b7', borderColor: '#059669', cursor: 'pointer', margin: 0, whiteSpace: 'nowrap' }}
+                          style={{ fontSize: 10, padding: '3px 8px', background: '#1e293b', color: '#64748b', borderColor: '#334155', cursor: 'not-allowed', margin: 0, opacity: 0.6 }}
+                          disabled={true}
                         >
-                          {importingDanceRef ? '⏳ Uploading...' : 'Upload Video'}
-                          <input type="file" accept="video/*,.mp4,.mov,.webm" style={{ display: 'none' }} onChange={uploadReferenceDanceFile} disabled={importingDanceRef} />
-                        </label>
-                        {referenceVideoUrl && (
-                          <button
-                            type="button"
-                            className="btn btn-outline"
-                            style={{ fontSize: 10, padding: '3px 6px', color: '#fca5a5', borderColor: '#7f1d1d', background: '#450a0a' }}
-                            onClick={removeDanceReference}
-                            title="Remove reference video"
-                          >
-                            ✕
-                          </button>
-                        )}
+                          Disabled
+                        </button>
+                      </div>
+                      <div style={{ fontSize: 10, color: '#f59e0b', lineHeight: 1.4 }}>
+                        ⚠️ Reference video ingestion (both YouTube links and file uploads) is temporarily disabled pending consent, provenance verification, and pose-only processing safeguards.
                       </div>
                     </div>
 
@@ -2467,6 +2451,17 @@ function ScriptStudio({ brands }: { brands: Row[] }) {
             </div>
           )}
 
+          <div style={{ width: '100%' }}>
+            <MotionAndVideoStudioStatus
+              characterName={detail?.character?.name || (detail?.characterId ? `Character #${detail.characterId}` : 'Persona B (Latina)')}
+              referenceVideoName={referenceVideoName}
+              referenceVideoUrl={referenceVideoUrl}
+              hasRealDance={Boolean(detail?.assets?.some((a: Row) => a.type === 'SCENE_VIDEO' && a.provider?.includes('DanceReference')))}
+              gpuConnected={Boolean(gpuHealth?.connected)}
+              videoRendered={Boolean(videoUrl)}
+            />
+          </div>
+
           {detail?.assets && detail.assets.length > 0 && (
             <div style={{ width: '100%', marginTop: 24 }}>
               <h4>Generated Production Assets ({detail.assets.length})</h4>
@@ -2784,28 +2779,10 @@ function ScriptStudio({ brands }: { brands: Row[] }) {
                   </div>
                 </div>
               ) : (
-                <div>
-                  <div style={{ fontSize: 12, color: '#cbd5e1', marginBottom: 6 }}>
-                    No video reference attached. You can sync a YouTube dance link or proceed with procedural choreography:
+                <div style={{ background: '#090e1a', padding: '10px 12px', borderRadius: 6, border: '1px solid #1e293b' }}>
+                  <div style={{ fontSize: 11, color: '#f59e0b', lineHeight: 1.4 }}>
+                    ⚠️ Reference video ingestion is temporarily disabled pending consent, provenance verification, and pose-only processing safeguards. Proceeding with procedural choreography and audio beat detection.
                   </div>
-                  <form onSubmit={handleAttachDanceReference} style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                    <input
-                      type="url"
-                      placeholder="https://youtube.com/shorts/... or video link"
-                      value={youtubeDanceUrl}
-                      onChange={(e) => setYoutubeDanceUrl(e.target.value)}
-                      style={{ fontSize: 11, padding: '6px 8px', background: '#090e1a', flex: 1 }}
-                      disabled={importingDanceRef}
-                    />
-                    <button
-                      type="submit"
-                      className="btn btn-outline"
-                      style={{ fontSize: 11, padding: '6px 12px', borderColor: '#38bdf8', color: '#38bdf8', background: '#0c2238', whiteSpace: 'nowrap' }}
-                      disabled={importingDanceRef || !youtubeDanceUrl.trim()}
-                    >
-                      {importingDanceRef ? '⏳ Syncing...' : '⚡ Sync'}
-                    </button>
-                  </form>
                 </div>
               )}
             </div>
@@ -4165,12 +4142,28 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function App() {
   const [user, setUser] = useState<Row | null | undefined>(undefined);
-  const [tab, setTab] = useState('Script & Video Studio');
+  const [tab, setTab] = useState('Generation Monitor');
   const [brands, setBrands] = useState<Row[]>([]);
+  const [experimentsData, setExperimentsData] = useState<ExperimentsPayload | null>(null);
+  const [selectedExperiment, setSelectedExperiment] = useState<HistoricalExperiment | null>(null);
 
   const refresh = () => {
-    api('GET', '/auth/me').then(setUser).catch(() => setUser(null));
-    api('GET', '/brands').then(setBrands).catch(() => setBrands([]));
+    api('GET', '/auth/me')
+      .then((u) => {
+        setUser(u);
+        if (u) {
+          api('GET', '/brands').then(setBrands).catch(() => setBrands([]));
+          api('GET', '/experiments').then(setExperimentsData).catch((e) => console.error('Failed to load experiments metadata:', e));
+        } else {
+          setBrands([]);
+          setExperimentsData(null);
+        }
+      })
+      .catch(() => {
+        setUser(null);
+        setBrands([]);
+        setExperimentsData(null);
+      });
   };
 
   useEffect(() => { refresh(); }, []);
@@ -4199,11 +4192,17 @@ function App() {
         </header>
 
         {!user ? (
-          <Login onDone={refresh} />
+          <div style={{ maxWidth: 480, margin: '60px auto' }}>
+            <Login onDone={refresh} />
+          </div>
         ) : (
           <div>
             <nav className="nav-tabs">
               {[
+                'Generation Monitor',
+                'Overview',
+                'Experiment Gallery',
+                'Benchmarks',
                 'Ideas Studio',
                 'Script & Video Studio',
                 'Publishing Calendar',
@@ -4219,12 +4218,28 @@ function App() {
               ))}
             </nav>
 
+            {tab === 'Generation Monitor' && <GenerationMonitorView data={experimentsData} />}
+            {tab === 'Overview' && <OverviewDashboard data={experimentsData} />}
+            {tab === 'Experiment Gallery' && (
+              <ExperimentGallery
+                experiments={experimentsData?.experiments || []}
+                onSelectExperiment={(exp) => setSelectedExperiment(exp)}
+              />
+            )}
+            {tab === 'Benchmarks' && <BenchmarksView benchmarks={experimentsData?.benchmarks || []} />}
             {tab === 'Ideas Studio' && <IdeasStudio brands={brands} />}
             {tab === 'Script & Video Studio' && <ScriptStudio brands={brands} />}
             {tab === 'Publishing Calendar' && <PublishingCalendar brands={brands} />}
             {tab === 'Characters' && <CharactersStudio brands={brands} />}
             {tab === 'RAG Knowledge Store' && <RAGKnowledgeStudio />}
             {RESOURCES[tab] && <ResourceView key={tab} name={tab} />}
+
+            {selectedExperiment && (
+              <ExperimentDetailModal
+                experiment={selectedExperiment}
+                onClose={() => setSelectedExperiment(null)}
+              />
+            )}
           </div>
         )}
       </div>

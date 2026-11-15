@@ -76,6 +76,10 @@ export class FFmpegVideoProvider implements VideoProvider {
     };
 
     try {
+      if (!options.scenes || options.scenes.length === 0) {
+        throw new Error('Video rendering failed: Scene list is empty.');
+      }
+
       // 1. Render animated motion clip or moving video clip for each scene
       for (let i = 0; i < options.scenes.length; i++) {
         const sc = options.scenes[i];
@@ -95,6 +99,7 @@ export class FFmpegVideoProvider implements VideoProvider {
             '-r', '30',
             clipFile
           ], { maxBuffer: 50 * 1024 * 1024 });
+          tempClips.push(clipFile);
         } else if (sc.imagePath && fs.existsSync(sc.imagePath)) {
           const motionVf = `${getMotionFilter(i, sc.durationSec)},format=yuv420p`;
 
@@ -109,9 +114,12 @@ export class FFmpegVideoProvider implements VideoProvider {
             '-r', '30',
             clipFile
           ], { maxBuffer: 50 * 1024 * 1024 });
+          tempClips.push(clipFile);
         }
+      }
 
-        tempClips.push(clipFile);
+      if (tempClips.length === 0) {
+        throw new Error('Video rendering failed: No valid scene images or video clips found on disk to render.');
       }
 
       // 2. Build concat list for animated clips
@@ -153,7 +161,7 @@ export class FFmpegVideoProvider implements VideoProvider {
           '-af', 'volume=1.0',
           '-shortest'
         );
-      } else if (hasAudio && hasBgm && candidateBgm) {
+      } else if (options.audioMode !== 'narration_only' && hasAudio && hasBgm && candidateBgm) {
         ffmpegArgs.push('-i', path.resolve(options.audioTrackPath));
         ffmpegArgs.push('-stream_loop', '-1', '-i', candidateBgm);
         ffmpegArgs.push(
@@ -166,7 +174,7 @@ export class FFmpegVideoProvider implements VideoProvider {
         );
       } else if (hasAudio) {
         ffmpegArgs.push('-i', path.resolve(options.audioTrackPath));
-        ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k', '-shortest');
+        ffmpegArgs.push('-map', '0:v', '-map', '1:a', '-c:a', 'aac', '-b:a', '192k', '-shortest');
       }
 
       ffmpegArgs.push(

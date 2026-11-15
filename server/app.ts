@@ -8,6 +8,7 @@ import type { DB } from './db.js';
 import { crud, uid } from './crud.js';
 import { createContentEngineRouter } from './content_engine.js';
 import { createJobsRouter } from './jobs.js';
+import { createExperimentsRouter } from './experiments.js';
 
 const hash = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
 const hashPw = (pw: string) => { const s = crypto.randomBytes(16).toString('hex'); return s + ':' + crypto.scryptSync(pw, s, 64).toString('hex'); };
@@ -15,7 +16,7 @@ const checkPw = (pw: string, st: string) => { const [s, h] = st.split(':'); retu
 const cred = z.object({ email: z.string().email(), password: z.string().min(8) });
 const str = z.string().max(2000).optional(), num = z.number().int().min(0).max(120).optional(), list = z.array(z.string().max(200)).max(50).default([]);
 
-export function createApp(db: DB, opts: { secureCookie?: boolean } = {}) {
+export function createApp(db: DB, opts: { secureCookie?: boolean; modelsDir?: string; providers?: { llm?: any; ragEngine?: any } } = {}) {
   const app = express();
   app.use('/storage', express.static(path.resolve('./data/storage')));
   app.use(express.json({ limit: '100mb' }));
@@ -72,8 +73,9 @@ export function createApp(db: DB, opts: { secureCookie?: boolean } = {}) {
     schema: z.object({ brandId: z.number().int(), title: z.string().min(1).max(200), topic: str, status: z.enum(['DRAFT', 'APPROVED', 'REJECTED', 'READY_FOR_REVIEW', 'ARCHIVED']).optional(), aiGenerated: z.boolean().optional() }),
     check: (d, u, x) => x.brandId != null && !d.prepare('SELECT 1 FROM brands WHERE id=? AND ownerId=?').get(x.brandId, u) ? 'brand not found' : null,
   }));
-  api.use('/', createContentEngineRouter(db));
+  api.use('/', createContentEngineRouter(db, opts.providers));
   api.use('/', createJobsRouter(db));
+  api.use('/experiments', createExperimentsRouter(db, { baseDir: opts.modelsDir }));
   app.use('/api', api);
   app.use('/api', (_q, res) => res.status(404).json({ error: 'not found' }));
 

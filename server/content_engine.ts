@@ -8,12 +8,13 @@ import { z } from 'zod';
 import { uid } from './crud.js';
 import type { DB } from './db.js';
 import { LocalImageProvider } from './providers/image.js';
-import { LocalLLMProvider } from './providers/llm.js';
+import { LocalLLMProvider, createDefaultLLMProvider } from './providers/llm.js';
 import { OriginalityEngine } from './providers/originality.js';
 import { QualityGateEngine } from './providers/quality_gate.js';
 import { PlatformAdaptationEngine } from './providers/platform_adaptation.js';
 import { LocalTTSProvider } from './providers/tts.js';
-import type { BrandContext } from './providers/types.js';
+import type { BrandContext, SupportedAudioMode, LLMProvider } from './providers/types.js';
+import { resolveAudioMode, SUPPORTED_AUDIO_MODES, DEFAULT_AUDIO_MODE } from './providers/types.js';
 import { FFmpegVideoProvider, generateSrtContent } from './providers/video.js';
 import { AIDanceMotionProvider } from './providers/dance_motion.js';
 import { NeuralDanceProvider, formatHumanReadableGpuError } from './providers/neural_dance.js';
@@ -62,6 +63,33 @@ export async function prepareMultiAngleBeatPortrait(
   } catch {
     return baseImagePath;
   }
+}
+
+/**
+ * Retrieves the persisted audioMode for a content item from its latest VIDEO asset metadata or jobs record.
+ */
+export function getPersistedAudioMode(db: DB, contentItemId: number): string | undefined {
+  try {
+    const videoAsset = db.prepare("SELECT metadata FROM assets WHERE contentItemId=? AND type='VIDEO' ORDER BY id DESC").get(contentItemId) as any;
+    if (videoAsset?.metadata) {
+      const meta = typeof videoAsset.metadata === 'string' ? JSON.parse(videoAsset.metadata) : videoAsset.metadata;
+      if (meta?.audioMode && (SUPPORTED_AUDIO_MODES as readonly string[]).includes(meta.audioMode)) {
+        return meta.audioMode;
+      }
+    }
+  } catch {}
+
+  try {
+    const job = db.prepare("SELECT inputPayload FROM jobs WHERE contentItemId=? ORDER BY createdAt DESC LIMIT 1").get(contentItemId) as any;
+    if (job?.inputPayload) {
+      const payload = typeof job.inputPayload === 'string' ? JSON.parse(job.inputPayload) : job.inputPayload;
+      if (payload?.audioMode && (SUPPORTED_AUDIO_MODES as readonly string[]).includes(payload.audioMode)) {
+        return payload.audioMode;
+      }
+    }
+  } catch {}
+
+  return undefined;
 }
 
 export const DANCER_ARCHETYPES = [
@@ -186,47 +214,103 @@ export const DANCER_ARCHETYPES = [
   },
 ];
 
-export function createContentEngineRouter(db: DB): Router {
+export function createContentEngineRouter(db: DB, providers?: { llm?: LLMProvider; ragEngine?: RAGEngine }): Router {
   const router = express.Router();
 
-  const ragEngine = new RAGEngine(db);
-  const llm = new LocalLLMProvider(ragEngine);
+  const ragEngine = providers?.ragEngine ?? new RAGEngine(db);
+  const llm = providers?.llm ?? createDefaultLLMProvider(ragEngine);
   const tts = new LocalTTSProvider();
   const imageProvider = new LocalImageProvider();
   const videoProvider = new FFmpegVideoProvider();
   const characterGen = new CharacterGeneratorProvider(db);
 
-  // RAG Choreography & Consistency Knowledge Store API
+  // RAG Choreography & Consistency Knowledge Store API (Tenant-Scoped)
   router.get('/rag/knowledge', (req: Request, res: Response) => {
+    const userId = uid(req);
     const category = req.query.category as string | undefined;
-    const items = ragEngine.listKnowledge(category);
+    const items = ragEngine.listKnowledge(userId, category);
     res.json(items);
   });
 
   router.get('/rag/search', (req: Request, res: Response) => {
+    const userId = uid(req);
     const q = (req.query.q as string) || '';
     const category = req.query.category as string | undefined;
     const limit = req.query.limit ? Number(req.query.limit) : 4;
-    const results = ragEngine.search(q, { category, limit });
+    const results = ragEngine.search(q, { userId, category, limit });
     res.json(results);
   });
 
   router.post('/rag/knowledge', (req: Request, res: Response) => {
     try {
+      const userId = uid(req);
+
+      // Prevent ordinary users from spoofing ownership, provenance, or promoting records to system defaults
+      if ('ownerId' in req.body || 'isSystemDefault' in req.body || 'isQuarantined' in req.body || 'seedKey' in req.body) {
+        return res.status(400).json({ error: 'Specifying ownerId, isSystemDefault, isQuarantined, or seedKey is forbidden' });
+      }
+
       const schema = z.object({
         category: z.enum(['CHOREOGRAPHY', 'VIRAL_HOOKS', 'CHARACTER_CONSISTENCY', 'SAFETY_POLICY']),
-        title: z.string().min(2),
-        content: z.string().min(5),
-        tags: z.array(z.string()).default([]),
+        title: z.string().min(2).max(200),
+        content: z.string().min(5).max(10000),
+        tags: z.array(z.string().max(50)).max(20).default([]),
         metadata: z.record(z.any()).optional(),
       });
       const p = schema.safeParse(req.body);
       if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
 
-      const created = ragEngine.addKnowledge(p.data);
+      const created = ragEngine.addKnowledge(p.data, userId);
       res.status(201).json({ ok: true, item: created });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to add knowledge item' });
+    }
+  });
+
+  router.put('/rag/knowledge/:id', (req: Request, res: Response) => {
+    try {
+      const userId = uid(req);
+      const id = Number(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: 'Invalid knowledge ID' });
+
+      // Prevent altering ownership, provenance, or system default status
+      if ('ownerId' in req.body || 'isSystemDefault' in req.body || 'isQuarantined' in req.body || 'seedKey' in req.body) {
+        return res.status(400).json({ error: 'Modifying ownerId, isSystemDefault, isQuarantined, or seedKey is forbidden' });
+      }
+
+      const schema = z.object({
+        category: z.enum(['CHOREOGRAPHY', 'VIRAL_HOOKS', 'CHARACTER_CONSISTENCY', 'SAFETY_POLICY']).optional(),
+        title: z.string().min(2).max(200).optional(),
+        content: z.string().min(5).max(10000).optional(),
+        tags: z.array(z.string().max(50)).max(20).optional(),
+        metadata: z.record(z.any()).optional(),
+      });
+      const p = schema.safeParse(req.body);
+      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
+
+      const result = ragEngine.updateKnowledge(id, userId, p.data);
+      if (!result.ok) {
+        return res.status(result.status).json({ error: result.error });
+      }
+      res.json({ ok: true, item: result.item });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to update knowledge item' });
+    }
+  });
+
+  router.delete('/rag/knowledge/:id', (req: Request, res: Response) => {
+    try {
+      const userId = uid(req);
+      const id = Number(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: 'Invalid knowledge ID' });
+
+      const result = ragEngine.deleteKnowledge(id, userId);
+      if (!result.ok) {
+        return res.status(result.status).json({ error: result.error });
+      }
+      res.json({ ok: true, message: 'Knowledge item deleted' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Failed to delete knowledge item' });
     }
   });
 
@@ -494,6 +578,9 @@ export function createContentEngineRouter(db: DB): Router {
         const origCheck = OriginalityEngine.evaluateAgainstHistory(idea.title, idea.premise, history);
         const finalOriginalityScore = Math.min(idea.originalityScore, origCheck.score);
 
+        const isValidScore = typeof idea.potentialScore === 'number' && Number.isFinite(idea.potentialScore) && idea.potentialScore >= 0 && idea.potentialScore <= 100;
+        const dbPotentialScore = isValidScore ? Math.round(idea.potentialScore!) : -1;
+
         const row = db.prepare(`
           INSERT INTO content_ideas(ownerId, brandId, title, premise, category, potentialScore, originalityScore, visualPotentialScore, difficulty, status, audienceFit, tags)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -503,7 +590,7 @@ export function createContentEngineRouter(db: DB): Router {
           idea.title,
           idea.premise,
           idea.category,
-          idea.potentialScore,
+          dbPotentialScore,
           finalOriginalityScore,
           idea.visualPotentialScore,
           idea.difficulty,
@@ -512,9 +599,13 @@ export function createContentEngineRouter(db: DB): Router {
           JSON.stringify(idea.tags)
         );
 
+        const apiPotentialScore = isValidScore ? Math.round(idea.potentialScore!) : null;
+
         savedIdeas.push({
           id: row.lastInsertRowid,
           ...idea,
+          potentialScore: apiPotentialScore,
+          scoreSource: apiPotentialScore !== null ? (idea.scoreSource || 'model') : 'unavailable',
           originalityScore: finalOriginalityScore,
           repetitionWarning: origCheck.warning,
           status: 'DISCOVERED',
@@ -541,10 +632,17 @@ export function createContentEngineRouter(db: DB): Router {
     query += ' ORDER BY id DESC LIMIT 50';
 
     const rows = db.prepare(query).all(...params) as any[];
-    const parsed = rows.map((r) => ({
-      ...r,
-      tags: typeof r.tags === 'string' ? JSON.parse(r.tags) : [],
-    }));
+    const parsed = rows.map((r) => {
+      const isValidScore = typeof r.potentialScore === 'number' && Number.isFinite(r.potentialScore) && r.potentialScore >= 0 && r.potentialScore <= 100;
+      const potentialScore = isValidScore ? Math.round(r.potentialScore) : null;
+
+      return {
+        ...r,
+        potentialScore,
+        scoreSource: potentialScore !== null ? 'stored' : 'unavailable',
+        tags: typeof r.tags === 'string' ? JSON.parse(r.tags) : [],
+      };
+    });
     res.json(parsed);
   });
 
@@ -561,15 +659,16 @@ export function createContentEngineRouter(db: DB): Router {
       const brand = getBrandContext(idea.brandId, userId);
       const char = characterId ? (db.prepare('SELECT * FROM characters WHERE id=? AND ownerId=?').get(characterId, userId) as any) : null;
 
-      // 1. Create content item
+      // 1. Generate 5-scene story & script (scoped to authenticated tenant RAG context)
+      const story = await llm.generateStory(brand, idea.title, idea.premise, char || undefined, userId);
+      const isAiGenerated = story.metadata?.provider === 'ollama' ? 1 : 0;
+
+      // 2. Create content item
       const itemRes = db.prepare(`
         INSERT INTO content_items(ownerId, brandId, title, topic, status, aiGenerated)
-        VALUES (?, ?, ?, ?, ?, 1)
-      `).run(userId, brand.id, idea.title, idea.category, 'DRAFT');
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(userId, brand.id, idea.title, idea.category, 'DRAFT', isAiGenerated);
       const contentItemId = itemRes.lastInsertRowid as number;
-
-      // 2. Generate 5-scene story & script
-      const story = await llm.generateStory(brand, idea.title, idea.premise, char || undefined);
 
       const scriptRes = db.prepare(`
         INSERT INTO scripts(ownerId, contentItemId, brandId, title, hook, premise, targetDurationSec, language, tone, endingType)
@@ -649,7 +748,7 @@ export function createContentEngineRouter(db: DB): Router {
           scenes: p.data.customScenes,
         };
       } else {
-        story = await llm.generateStory(brand, p.data.title, p.data.premise, char || undefined);
+        story = await llm.generateStory(brand, p.data.title, p.data.premise, char || undefined, userId);
       }
 
       const scriptRes = db.prepare(`
@@ -830,136 +929,13 @@ export function createContentEngineRouter(db: DB): Router {
   });
 
   // Attach Dance Reference Video (via YouTube Short / Video link or file upload) & Auto-Sync to 5 Beats
-  router.post('/content/:id/attach-dance-reference', async (req: Request, res: Response) => {
-    try {
-      const contentItemId = Number(req.params.id);
-      const userId = uid(req);
-
-      const schema = z.object({
-        youtubeUrl: z.string().optional(),
-        videoUrl: z.string().optional(),
-        videoBase64: z.string().optional(),
-        filename: z.string().optional(),
-        autoSlice: z.boolean().default(true),
-      });
-      const p = schema.safeParse(req.body);
-      if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
-
-      const targetDir = path.resolve('./data/storage/videos');
-      fs.mkdirSync(targetDir, { recursive: true });
-
-      const safeName = p.data.filename
-        ? `ref_${contentItemId}_${p.data.filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`
-        : `ref_dance_${contentItemId}_${Date.now()}.mp4`;
-      const outFile = path.join(targetDir, safeName.endsWith('.mp4') ? safeName : `${safeName}.mp4`);
-
-      if (p.data.youtubeUrl && p.data.youtubeUrl.trim()) {
-        const cleanYtUrl = p.data.youtubeUrl.trim();
-        console.log(`[DanceReference] Downloading YouTube dance reference: ${cleanYtUrl}`);
-        const ytDlpBin = fs.existsSync('/opt/homebrew/bin/yt-dlp') ? '/opt/homebrew/bin/yt-dlp' : 'yt-dlp';
-
-        try {
-          await execFileAsync(ytDlpBin, [
-            '--no-playlist',
-            '-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-            '--merge-output-format', 'mp4',
-            '--no-progress',
-            '-o', outFile,
-            cleanYtUrl,
-          ], { timeout: 360_000, maxBuffer: 100 * 1024 * 1024 });
-        } catch (ytErr: any) {
-          // Check if file was successfully written and merged despite non-fatal warnings
-          if (fs.existsSync(outFile) && fs.statSync(outFile).size > 1000) {
-            console.warn('[DanceReference] yt-dlp completed with non-fatal code, valid output file verified:', fs.statSync(outFile).size);
-          } else {
-            console.error('[DanceReference] yt-dlp error:', ytErr.message);
-            throw new Error(`YouTube download failed: ${ytErr.message || 'Could not fetch video stream'}`);
-          }
-        }
-      } else if (p.data.videoUrl && p.data.videoUrl.trim()) {
-        const resp = await fetch(p.data.videoUrl.trim());
-        if (!resp.ok) throw new Error(`Failed to download reference video from URL (HTTP ${resp.status})`);
-        const buf = await resp.arrayBuffer();
-        fs.writeFileSync(outFile, Buffer.from(buf));
-      } else if (p.data.videoBase64) {
-        const cleanB64 = p.data.videoBase64.replace(/^data:video\/[a-zA-Z0-9]+;base64,/, '');
-        fs.writeFileSync(outFile, Buffer.from(cleanB64, 'base64'));
-      } else {
-        return res.status(400).json({ error: 'Please provide either a YouTube video link or upload a video file.' });
-      }
-
-      if (!fs.existsSync(outFile) || fs.statSync(outFile).size < 1000) {
-        throw new Error('Downloaded reference video file is empty or corrupted');
-      }
-
-      // Record in assets as REFERENCE_VIDEO
-      db.prepare("DELETE FROM assets WHERE contentItemId=? AND type='REFERENCE_VIDEO'").run(contentItemId);
-      db.prepare(`
-        INSERT INTO assets(ownerId, contentItemId, type, provider, filePath, mimeType)
-        VALUES (?, ?, 'REFERENCE_VIDEO', ?, ?, 'video/mp4')
-      `).run(userId, contentItemId, p.data.youtubeUrl ? 'YouTube' : 'CustomUpload', outFile);
-
-      // Auto-slice reference video across all 5 scene beats if autoSlice is enabled
-      let slicedCount = 0;
-      if (p.data.autoSlice !== false) {
-        const script = db.prepare('SELECT * FROM scripts WHERE contentItemId=?').get(contentItemId) as any;
-        if (script) {
-          const scenes = db.prepare('SELECT * FROM scenes WHERE scriptId=? ORDER BY sceneOrder ASC').all(script.id) as any[];
-          let startOffset = 0;
-
-          for (const sc of scenes) {
-            const dur = sc.durationSec || 8;
-            const sliceFile = path.join(targetDir, `clip_ref_${contentItemId}_${sc.id}_${Date.now()}.mp4`);
-            try {
-              // Extract slice with zero stretching: centered character with dynamic ambient-blur background fill
-              await execFileAsync('ffmpeg', [
-                '-y',
-                '-ss', String(startOffset),
-                '-t', String(dur),
-                '-i', outFile,
-                '-filter_complex', '[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-pix_fmt', 'yuv420p',
-                '-an',
-                '-r', '30',
-                sliceFile,
-              ], { maxBuffer: 50 * 1024 * 1024 });
-
-              if (fs.existsSync(sliceFile) && fs.statSync(sliceFile).size > 1000) {
-                db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='REFERENCE_SLICE'").run(contentItemId, sc.id);
-                db.prepare(`
-                  INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
-                  VALUES (?, ?, ?, 'REFERENCE_SLICE', 'DanceReference/Slice', ?, 'video/mp4')
-                `).run(userId, contentItemId, sc.id, sliceFile);
-
-                // Auto-wire as active scene video so master render immediately uses real dance choreography
-                db.prepare("DELETE FROM assets WHERE contentItemId=? AND sceneId=? AND type='SCENE_VIDEO'").run(contentItemId, sc.id);
-                db.prepare(`
-                  INSERT INTO assets(ownerId, contentItemId, sceneId, type, provider, filePath, mimeType)
-                  VALUES (?, ?, ?, 'SCENE_VIDEO', 'DanceReference/PhysicalVideo', ?, 'video/mp4')
-                `).run(userId, contentItemId, sc.id, sliceFile);
-                slicedCount++;
-              }
-            } catch (sliceErr: any) {
-              console.warn(`[DanceReference] Failed to slice beat ${sc.sceneOrder}:`, sliceErr.message);
-            }
-            startOffset += dur;
-          }
-        }
-      }
-
-      res.status(201).json({
-        ok: true,
-        filePath: outFile,
-        filename: path.basename(outFile),
-        referenceUrl: `/storage/videos/${path.basename(outFile)}`,
-        slicedCount,
-      });
-    } catch (err: any) {
-      console.error('[DanceReference Error]:', err);
-      res.status(500).json({ error: err.message || 'Failed to attach dance reference video' });
-    }
+  // NOTE (Phase 2C.0.4 Security Finding D): Reference video ingestion is disabled fail-closed
+  // pending consent, provenance verification, and pose-only processing safeguards.
+  router.post('/content/:id/attach-dance-reference', async (_req: Request, res: Response) => {
+    return res.status(410).json({
+      error: 'REFERENCE_VIDEO_UPLOAD_DISABLED',
+      message: 'Reference video ingestion is temporarily disabled pending consent, provenance verification, and pose-only processing safeguards.',
+    });
   });
 
   // Apply Dance Reference Slices to All Scene Beats
@@ -1421,7 +1397,13 @@ export function createContentEngineRouter(db: DB): Router {
       [imgDir, audioDir, subDir, vidDir].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
       // 1. Audio Track: Pure Music or Voiceover Narration
-      const audioMode = (req.body?.audioMode as string) || (req.query?.audioMode as string) || 'music_only';
+      const reqAudioMode = (req.body?.audioMode as string) || (req.query?.audioMode as string);
+      const persistedAudioMode = getPersistedAudioMode(db, id);
+      const resolvedAudio = resolveAudioMode(reqAudioMode, persistedAudioMode);
+      if (resolvedAudio.error) {
+        return res.status(400).json({ error: resolvedAudio.error });
+      }
+      const audioMode = resolvedAudio.mode;
       let audioPath = '';
 
       if (audioMode !== 'music_only') {
@@ -1552,7 +1534,7 @@ export function createContentEngineRouter(db: DB): Router {
       db.prepare(`
         INSERT INTO assets(ownerId, contentItemId, type, provider, filePath, mimeType, metadata)
         VALUES (?, ?, 'VIDEO', 'FFmpeg', ?, 'video/mp4', ?)
-      `).run(userId, id, finalVideoPath, JSON.stringify({ durationSec: totalDuration, resolution: '1080x1920', aspectRatio: '9:16' }));
+      `).run(userId, id, finalVideoPath, JSON.stringify({ durationSec: totalDuration, resolution: '1080x1920', aspectRatio: '9:16', audioMode }));
 
       // 5. Update content item status to READY_FOR_REVIEW
       db.prepare("UPDATE content_items SET status='READY_FOR_REVIEW' WHERE id=?").run(id);
@@ -1615,12 +1597,20 @@ export function createContentEngineRouter(db: DB): Router {
       const assets = db.prepare('SELECT * FROM assets WHERE contentItemId=?').all(id) as any[];
       const history = db.prepare('SELECT title, premise FROM originality_fingerprints WHERE brandId=? AND contentItemId!=?').all(item.brandId, id) as any[];
 
+      const reqAudioMode = (req.body?.audioMode as string) || (req.query?.audioMode as string);
+      const persistedAudioMode = getPersistedAudioMode(db, id);
+      const resolvedAudio = resolveAudioMode(reqAudioMode, persistedAudioMode);
+      if (resolvedAudio.error) {
+        return res.status(400).json({ error: resolvedAudio.error });
+      }
+
       const report = QualityGateEngine.evaluate({
         brand,
         script,
         scenes,
         assets,
         history,
+        audioMode: resolvedAudio.mode,
       });
 
       db.prepare(`
@@ -1651,7 +1641,21 @@ export function createContentEngineRouter(db: DB): Router {
       const history = db.prepare('SELECT title, premise FROM originality_fingerprints WHERE brandId=? AND contentItemId!=?').all(item.brandId, id) as any[];
 
       if (script && scenes.length > 0) {
-        const qg = QualityGateEngine.evaluate({ brand, script, scenes, assets, history });
+        const reqAudioMode = (req.body?.audioMode as string) || (req.query?.audioMode as string);
+        const persistedAudioMode = getPersistedAudioMode(db, id);
+        const resolvedAudio = resolveAudioMode(reqAudioMode, persistedAudioMode);
+        if (resolvedAudio.error) {
+          return res.status(400).json({ error: resolvedAudio.error });
+        }
+
+        const qg = QualityGateEngine.evaluate({
+          brand,
+          script,
+          scenes,
+          assets,
+          history,
+          audioMode: resolvedAudio.mode,
+        });
         if (!qg.canPublish) {
           return res.status(400).json({ error: 'Cannot approve: Quality Gate checks failed.', qualityReport: qg });
         }

@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { OriginalityEngine } from './originality.js';
-import type { BrandContext } from './types.js';
+import type { BrandContext, SupportedAudioMode } from './types.js';
+import { resolveAudioMode, SUPPORTED_AUDIO_MODES } from './types.js';
 
 export interface QualityCheckItem {
   name: string;
@@ -25,6 +27,7 @@ export class QualityGateEngine {
     scenes: Array<{ sceneOrder: number; narration: string; visualPrompt: string; durationSec: number }>;
     assets: Array<{ type: string; filePath: string; metadata?: string }>;
     history: Array<{ title: string; premise: string }>;
+    audioMode?: SupportedAudioMode | string;
   }): QualityGateReport {
     const checks: QualityCheckItem[] = [];
     let safetyScore = 100;
@@ -127,6 +130,28 @@ export class QualityGateEngine {
     const videoAsset = options.assets.find((a) => a.type === 'VIDEO');
     const audioAsset = options.assets.find((a) => a.type === 'AUDIO');
     const subtitleAsset = options.assets.find((a) => a.type === 'SUBTITLE');
+    const musicAsset = options.assets.find((a) => a.type === 'MUSIC');
+
+    // Resolve audio mode: explicit options -> videoAsset metadata -> DEFAULT_AUDIO_MODE
+    let configuredAudioMode: string | undefined = options.audioMode;
+    if (!configuredAudioMode && videoAsset?.metadata) {
+      try {
+        const meta = typeof videoAsset.metadata === 'string' ? JSON.parse(videoAsset.metadata) : videoAsset.metadata;
+        if (meta?.audioMode) configuredAudioMode = meta.audioMode;
+      } catch {}
+    }
+    const resolvedAudio = resolveAudioMode(configuredAudioMode);
+    if (resolvedAudio.error) {
+      criticalFail = true;
+      checks.push({
+        name: 'Audio Mode Configuration',
+        category: 'TECHNICAL',
+        status: 'FAIL',
+        message: resolvedAudio.error,
+        recommendation: `Configure a supported audioMode (${SUPPORTED_AUDIO_MODES.join(', ')}) in render options.`,
+      });
+    }
+    const activeAudioMode = resolvedAudio.mode;
 
     if (!videoAsset || !fs.existsSync(videoAsset.filePath)) {
       criticalFail = true;
@@ -146,22 +171,104 @@ export class QualityGateEngine {
       });
     }
 
-    if (!audioAsset || !fs.existsSync(audioAsset.filePath)) {
-      criticalFail = true;
-      checks.push({
-        name: 'Voiceover Audio Track',
-        category: 'TECHNICAL',
-        status: 'FAIL',
-        message: 'Narration voice audio track is missing.',
-        recommendation: 'Re-render to generate synchronized speech narration.',
-      });
-    } else {
+    const audioDir = path.resolve('./data/storage/audio');
+    const candidateBgm = [
+      path.join(audioDir, 'bollywood_monsoon_beat.mp3'),
+      path.join(audioDir, 'hindi_music.mp3'),
+      path.join(audioDir, 'sensual_bgm.mp3'),
+      path.join(audioDir, 'bgm.mp3'),
+    ].find((p) => fs.existsSync(p));
+    const hasMusic = (musicAsset && fs.existsSync(musicAsset.filePath)) || !!candidateBgm;
+
+    if (activeAudioMode === 'music_only') {
+      // Voiceover narration is explicitly omitted in music_only mode
       checks.push({
         name: 'Voiceover Audio Track',
         category: 'TECHNICAL',
         status: 'PASS',
-        message: 'Narration audio track present and synchronized.',
+        message: 'Voiceover narration omitted by configuration (music_only mode).',
       });
+
+      // Music soundtrack is strictly required in music_only mode
+      if (!hasMusic) {
+        criticalFail = true;
+        checks.push({
+          name: 'Music Soundtrack Track',
+          category: 'TECHNICAL',
+          status: 'FAIL',
+          message: 'Music soundtrack track is missing for music_only mode.',
+          recommendation: 'Attach a music track via /attach-music or ensure fallback background music exists.',
+        });
+      } else {
+        checks.push({
+          name: 'Music Soundtrack Track',
+          category: 'TECHNICAL',
+          status: 'PASS',
+          message: 'Song music audio track present and active for music-only mode.',
+        });
+      }
+    } else if (activeAudioMode === 'narration_only') {
+      // Narration voiceover is strictly required in narration_only mode
+      if (!audioAsset || !fs.existsSync(audioAsset.filePath)) {
+        criticalFail = true;
+        checks.push({
+          name: 'Voiceover Audio Track',
+          category: 'TECHNICAL',
+          status: 'FAIL',
+          message: 'Narration voice audio track is missing for narration_only mode.',
+          recommendation: 'Re-render to generate synchronized speech narration.',
+        });
+      } else {
+        checks.push({
+          name: 'Voiceover Audio Track',
+          category: 'TECHNICAL',
+          status: 'PASS',
+          message: 'Narration audio track present and synchronized.',
+        });
+      }
+
+      checks.push({
+        name: 'Music Soundtrack Track',
+        category: 'TECHNICAL',
+        status: 'PASS',
+        message: 'Background music omitted by configuration (narration_only mode).',
+      });
+    } else {
+      // Default 'narration_and_music': Both voiceover and background music are validated
+      if (!audioAsset || !fs.existsSync(audioAsset.filePath)) {
+        criticalFail = true;
+        checks.push({
+          name: 'Voiceover Audio Track',
+          category: 'TECHNICAL',
+          status: 'FAIL',
+          message: 'Narration voice audio track is missing.',
+          recommendation: 'Re-render to generate synchronized speech narration.',
+        });
+      } else {
+        checks.push({
+          name: 'Voiceover Audio Track',
+          category: 'TECHNICAL',
+          status: 'PASS',
+          message: 'Narration audio track present and synchronized.',
+        });
+      }
+
+      if (hasMusic) {
+        checks.push({
+          name: 'Background Music Track',
+          category: 'TECHNICAL',
+          status: 'PASS',
+          message: 'Background music track present and mixed with narration.',
+        });
+      } else {
+        checks.push({
+          name: 'Background Music Track',
+          category: 'TECHNICAL',
+          status: 'WARN',
+          message: 'Background music track not found; audio will play voiceover only.',
+          recommendation: 'Attach a music track or provide default BGM in storage for richer audio.',
+        });
+      }
     }
 
     if (!subtitleAsset || !fs.existsSync(subtitleAsset.filePath)) {
