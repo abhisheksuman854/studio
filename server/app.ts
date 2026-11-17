@@ -16,7 +16,7 @@ const checkPw = (pw: string, st: string) => { const [s, h] = st.split(':'); retu
 const cred = z.object({ email: z.string().email(), password: z.string().min(8) });
 const str = z.string().max(2000).optional(), num = z.number().int().min(0).max(120).optional(), list = z.array(z.string().max(200)).max(50).default([]);
 
-export function createApp(db: DB, opts: { secureCookie?: boolean; modelsDir?: string; providers?: { llm?: any; ragEngine?: any } } = {}) {
+export function createApp(db: DB, opts: { secureCookie?: boolean; modelsDir?: string; providers?: { llm?: any; ragEngine?: any; coordinator?: any } } = {}) {
   const app = express();
   app.use('/storage', express.static(path.resolve('./data/storage')));
   app.use(express.json({ limit: '100mb' }));

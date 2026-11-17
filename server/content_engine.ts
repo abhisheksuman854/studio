@@ -214,11 +214,11 @@ export const DANCER_ARCHETYPES = [
   },
 ];
 
-export function createContentEngineRouter(db: DB, providers?: { llm?: LLMProvider; ragEngine?: RAGEngine }): Router {
+export function createContentEngineRouter(db: DB, providers?: { llm?: LLMProvider; ragEngine?: RAGEngine; coordinator?: any }): Router {
   const router = express.Router();
 
   const ragEngine = providers?.ragEngine ?? new RAGEngine(db);
-  const llm = providers?.llm ?? createDefaultLLMProvider(ragEngine);
+  const llm = providers?.llm ?? createDefaultLLMProvider(ragEngine, { coordinator: providers?.coordinator });
   const tts = new LocalTTSProvider();
   const imageProvider = new LocalImageProvider();
   const videoProvider = new FFmpegVideoProvider();

@@ -1,16 +1,25 @@
-import type { BrandContext, CharacterContext, GeneratedStory, GeneratedStoryScene, IdeaItem, LLMExecutionMetadata, LLMProvider } from './types.js';
+import type { BrandContext, CharacterContext, GeneratedStory, GeneratedStoryScene, IdeaItem, LLMExecutionMetadata, LLMErrorEvidence, LLMProvider } from './types.js';
 import type { RAGEngine } from './rag_engine.js';
+import type { ResourceCoordinator, Reservation } from '../coordinator/index.js';
+import type { OllamaLifecycleAdapter, ModelAvailabilityStatus } from '../coordinator/ollama_lifecycle.js';
 
 export type LLMErrorCode =
   | 'LLM_UNAVAILABLE'
   | 'LLM_TIMEOUT'
+  | 'LLM_UNCERTAIN_DISRUPTION'
   | 'LLM_MODEL_NOT_FOUND'
+  | 'LLM_INVALID_REQUEST'
+  | 'LLM_PROVIDER_ERROR'
   | 'LLM_INVALID_RESPONSE'
   | 'LLM_INVALID_OUTPUT'
   | 'LLM_INTERNAL_ERROR';
 
 export class SanitizedLLMError extends Error {
-  constructor(public readonly code: LLMErrorCode, message: string) {
+  constructor(
+    public readonly code: LLMErrorCode,
+    message: string,
+    public readonly evidence: LLMErrorEvidence = 'TERMINATION_UNCERTAIN'
+  ) {
     super(`[${code}] ${message}`);
     this.name = 'SanitizedLLMError';
   }
@@ -56,9 +65,12 @@ export interface OllamaProviderOptions {
   baseUrl?: string;
   model?: string;
   timeoutMs?: number;
+  admissionTimeoutMs?: number;
   temperature?: number;
   keepAlive?: string | number;
   fetchFn?: typeof fetch;
+  coordinator?: ResourceCoordinator;
+  lifecycleAdapter?: OllamaLifecycleAdapter;
 }
 
 export class LocalLLMProvider implements LLMProvider {
@@ -318,11 +330,14 @@ const STORY_JSON_SCHEMA = {
 export class OllamaLLMProvider implements LLMProvider {
   private ragEngine?: RAGEngine;
   private baseUrl: string;
-  private model: string;
+  public readonly model: string;
   private timeoutMs: number;
+  private admissionTimeoutMs?: number;
   private temperature: number;
   private keepAlive?: string | number;
   private fetchFn: typeof fetch;
+  public readonly coordinator?: ResourceCoordinator;
+  public readonly lifecycleAdapter?: OllamaLifecycleAdapter;
 
   constructor(ragEngine?: RAGEngine, options: OllamaProviderOptions = {}) {
     this.ragEngine = ragEngine;
@@ -330,9 +345,127 @@ export class OllamaLLMProvider implements LLMProvider {
     this.baseUrl = validateOllamaEndpoint(rawEndpoint);
     this.model = options.model || 'qwen2.5:1.5b';
     this.timeoutMs = options.timeoutMs ?? 60000;
+    this.admissionTimeoutMs = options.admissionTimeoutMs;
     this.temperature = options.temperature ?? 0.7;
     this.keepAlive = options.keepAlive;
     this.fetchFn = options.fetchFn ?? globalThis.fetch;
+    this.coordinator = options.coordinator;
+    this.lifecycleAdapter = options.lifecycleAdapter;
+  }
+
+  private async executeWithCoordination<T>(
+    operation: string,
+    ownerId: string,
+    metadata: Record<string, unknown>,
+    execute: (reservationId?: string) => Promise<T>
+  ): Promise<T> {
+    if (!this.coordinator) {
+      return execute();
+    }
+
+    const admissionTimeout = this.admissionTimeoutMs ?? this.timeoutMs;
+    const coordinatorAny = this.coordinator as any;
+    const reservation = await this.coordinator.acquire('LLM', ownerId, {
+      pid: process.pid,
+      metadata: {
+        operation,
+        model: this.model,
+        nodePid: process.pid,
+        processInstanceId: coordinatorAny?.processInstanceId,
+        processStartedAt: coordinatorAny?.processStartedAt,
+        ...metadata,
+      },
+      timeoutMs: admissionTimeout,
+    });
+
+    this.lifecycleAdapter?.startRequest(reservation.id, ownerId);
+
+    try {
+      const result = await execute(reservation.id);
+      this.lifecycleAdapter?.completeRequest(reservation.id);
+      await reservation.release();
+      return result;
+    } catch (err: any) {
+      const evidence: LLMErrorEvidence =
+        err instanceof SanitizedLLMError && err.evidence
+          ? err.evidence
+          : err?.name === 'TimeoutError' || err?.name === 'AbortError' || err?.message?.includes('timed out')
+          ? 'TERMINATION_UNCERTAIN'
+          : 'TERMINATION_UNCERTAIN';
+
+      (err as any).reservationId = reservation.id;
+      (err as any).errorEvidence = evidence;
+
+      if (evidence === 'TERMINATION_UNCERTAIN') {
+        // UNCERTAIN: Daemon execution state cannot be proven stopped -> FAIL CLOSED
+        this.lifecycleAdapter?.failRequest(reservation.id, err, true);
+        this.coordinator.markRecoveryRequired(
+          reservation.id,
+          `Inference request ended with uncertain daemon execution state: ${err?.message || err}`
+        );
+        // Do NOT release reservation!
+      } else {
+        // TERMINATION_VERIFIED, NOT_DISPATCHED, REJECTED_BEFORE_INFERENCE, COMPLETED_WITH_RESPONSE
+        this.lifecycleAdapter?.completeRequest(reservation.id);
+        try {
+          await reservation.release();
+        } catch {
+          // Ignore secondary release error
+        }
+      }
+
+      throw err;
+    }
+  }
+
+  /**
+   * Diagnostic model availability checker (Workstream F).
+   */
+  public async checkModelAvailability(): Promise<ModelAvailabilityStatus> {
+    if (this.lifecycleAdapter) {
+      return this.lifecycleAdapter.checkModelAvailability();
+    }
+    try {
+      const res = await this.fetchFn(`${this.baseUrl}/api/tags`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        return {
+          configuredModel: this.model,
+          installedModels: [],
+          isConfiguredModelInstalled: false,
+          daemonAvailable: false,
+          status: 'DAEMON_UNAVAILABLE',
+        };
+      }
+      const data = (await res.json()) as any;
+      const rawModels = Array.isArray(data?.models) ? data.models : [];
+      const installedModels: string[] = rawModels
+        .map((m: any) => m.name || m.model || String(m))
+        .filter(Boolean);
+      const isConfiguredModelInstalled = installedModels.some(
+        (m: string) =>
+          m === this.model ||
+          m.startsWith(this.model) ||
+          (this.model.includes(':') ? m === this.model : m.startsWith(`${this.model}:`))
+      );
+      return {
+        configuredModel: this.model,
+        installedModels,
+        isConfiguredModelInstalled,
+        daemonAvailable: true,
+        status: isConfiguredModelInstalled ? 'AVAILABLE' : 'MODEL_NOT_INSTALLED',
+      };
+    } catch {
+      return {
+        configuredModel: this.model,
+        installedModels: [],
+        isConfiguredModelInstalled: false,
+        daemonAvailable: false,
+        status: 'DAEMON_UNAVAILABLE',
+      };
+    }
   }
 
   private async callChat(messages: Array<{ role: string; content: string }>, schema?: any): Promise<any> {
@@ -364,13 +497,33 @@ export class OllamaLLMProvider implements LLMProvider {
       });
     } catch (err: any) {
       if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-        throw new SanitizedLLMError('LLM_TIMEOUT', `Inference request timed out after ${this.timeoutMs}ms`);
+        throw new SanitizedLLMError(
+          'LLM_TIMEOUT',
+          `Inference request timed out after ${this.timeoutMs}ms`,
+          'TERMINATION_UNCERTAIN'
+        );
       }
       const msg = err?.message || String(err);
-      if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
-        throw new SanitizedLLMError('LLM_UNAVAILABLE', `Local Ollama service unreachable at ${this.baseUrl}`);
+      const cause = err?.cause;
+      const isConnectionRefused =
+        cause?.code === 'ECONNREFUSED' ||
+        cause?.syscall === 'connect' ||
+        msg.includes('ECONNREFUSED');
+
+      if (isConnectionRefused) {
+        throw new SanitizedLLMError(
+          'LLM_UNAVAILABLE',
+          `Local Ollama service unreachable at ${this.baseUrl}`,
+          'NOT_DISPATCHED'
+        );
       }
-      throw new SanitizedLLMError('LLM_INTERNAL_ERROR', 'Network failure during local LLM request');
+
+      // Mid-stream socket disruption, premature close, broken pipe, or ambiguous fetch failure
+      throw new SanitizedLLMError(
+        'LLM_UNCERTAIN_DISRUPTION',
+        `Network socket disruption during local LLM request: ${msg}`,
+        'TERMINATION_UNCERTAIN'
+      );
     }
 
     if (!response.ok) {
@@ -379,251 +532,290 @@ export class OllamaLLMProvider implements LLMProvider {
       try {
         errText = await response.text();
       } catch {}
+
       if (status === 404 && errText.toLowerCase().includes('not found')) {
-        throw new SanitizedLLMError('LLM_MODEL_NOT_FOUND', `Model '${this.model}' not found in local Ollama store`);
+        throw new SanitizedLLMError(
+          'LLM_MODEL_NOT_FOUND',
+          `Model '${this.model}' not found in local Ollama store`,
+          'REJECTED_BEFORE_INFERENCE'
+        );
       }
-      throw new SanitizedLLMError('LLM_INVALID_RESPONSE', `Ollama HTTP error ${status}`);
+
+      if (status === 400) {
+        throw new SanitizedLLMError(
+          'LLM_INVALID_REQUEST',
+          `Ollama rejected request as invalid (HTTP 400)`,
+          'REJECTED_BEFORE_INFERENCE'
+        );
+      }
+
+      throw new SanitizedLLMError(
+        'LLM_INVALID_RESPONSE',
+        `Ollama HTTP error ${status}`,
+        'COMPLETED_WITH_RESPONSE'
+      );
     }
 
     let envelope: any;
     try {
       envelope = await response.json();
     } catch {
-      throw new SanitizedLLMError('LLM_INVALID_RESPONSE', 'Ollama returned non-JSON HTTP response');
+      throw new SanitizedLLMError(
+        'LLM_INVALID_RESPONSE',
+        'Ollama returned non-JSON HTTP response',
+        'COMPLETED_WITH_RESPONSE'
+      );
     }
 
     const content = envelope?.message?.content;
     if (typeof content !== 'string' || content.trim().length === 0) {
-      throw new SanitizedLLMError('LLM_INVALID_RESPONSE', 'Ollama response missing message content');
+      throw new SanitizedLLMError(
+        'LLM_INVALID_RESPONSE',
+        'Ollama response missing message content',
+        'COMPLETED_WITH_RESPONSE'
+      );
     }
 
     try {
       return JSON.parse(content);
     } catch {
-      throw new SanitizedLLMError('LLM_INVALID_RESPONSE', 'Model output failed JSON parsing');
+      throw new SanitizedLLMError(
+        'LLM_INVALID_RESPONSE',
+        'Model output failed JSON parsing',
+        'COMPLETED_WITH_RESPONSE'
+      );
     }
   }
 
   async generateIdeas(brand: BrandContext, count = 5): Promise<IdeaItem[]> {
-    const topics = brand.preferredTopics.length > 0
-      ? brand.preferredTopics.join(', ')
-      : 'Solo classical choreography, dramatic theatrical performance, golden velvet costume, midnight overture';
+    const ownerId = (brand as any).ownerId ? `user:${(brand as any).ownerId}` : (brand.id ? `brand:${brand.id}` : 'system:llm');
+    return this.executeWithCoordination('generateIdeas', ownerId, { brandId: brand.id }, async (reservationId) => {
+      const topics = brand.preferredTopics.length > 0
+        ? brand.preferredTopics.join(', ')
+        : 'Solo classical choreography, dramatic theatrical performance, golden velvet costume, midnight overture';
 
-    const systemPrompt = [
-      'You are a professional creative content strategist for cultural and performing arts video productions.',
-      'Generate a structured JSON object containing an array of high-concept video ideas.',
-      'Strictly adhere to the provided JSON Schema.',
-    ].join(' ');
+      const systemPrompt = [
+        'You are a professional creative content strategist for cultural and performing arts video productions.',
+        'Generate a structured JSON object containing an array of high-concept video ideas.',
+        'Strictly adhere to the provided JSON Schema.',
+      ].join(' ');
 
-    const userPrompt = [
-      `Brand Name: "${brand.name || 'Studio'}"`,
-      `Niche: "${brand.niche || 'Classical Dance & Performance'}"`,
-      `Tone: "${brand.tone || 'elegant, dramatic, mysterious'}"`,
-      `Target Demographics: Age ${brand.targetAgeMin || 21}-${brand.targetAgeMax || 60}`,
-      `Key Topics: ${topics}`,
-      `Requested Idea Count: ${count}`,
-      'Generate exactly the requested number of high-quality video concept ideas.',
-    ].join('\n');
+      const userPrompt = [
+        `Brand Name: "${brand.name || 'Studio'}"`,
+        `Niche: "${brand.niche || 'Classical Dance & Performance'}"`,
+        `Tone: "${brand.tone || 'elegant, dramatic, mysterious'}"`,
+        `Target Demographics: Age ${brand.targetAgeMin || 21}-${brand.targetAgeMax || 60}`,
+        `Key Topics: ${topics}`,
+        `Requested Idea Count: ${count}`,
+        'Generate exactly the requested number of high-quality video concept ideas.',
+      ].join('\n');
 
-    const startTime = Date.now();
-    const parsed = await this.callChat([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ], IDEAS_JSON_SCHEMA);
+      const startTime = Date.now();
+      const parsed = await this.callChat([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ], IDEAS_JSON_SCHEMA);
 
-    if (!parsed || !Array.isArray(parsed.ideas)) {
-      throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Structured output missing ideas array');
-    }
-
-    const latencyMs = Date.now() - startTime;
-    const validated: IdeaItem[] = [];
-    for (const item of parsed.ideas) {
-      if (typeof item.title !== 'string' || typeof item.premise !== 'string' || typeof item.category !== 'string') {
-        throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Idea item missing required string fields');
+      if (!parsed || !Array.isArray(parsed.ideas)) {
+        throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Structured output missing ideas array');
       }
 
-      const diff = (['EASY', 'MEDIUM', 'HARD'].includes(item.difficulty) ? item.difficulty : 'MEDIUM') as 'EASY' | 'MEDIUM' | 'HARD';
+      const latencyMs = Date.now() - startTime;
+      const validated: IdeaItem[] = [];
+      for (const item of parsed.ideas) {
+        if (typeof item.title !== 'string' || typeof item.premise !== 'string' || typeof item.category !== 'string') {
+          throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Idea item missing required string fields');
+        }
 
-      // Truthful score contract: preserve valid model score without artificial upward clamping;
-      // if missing, null, non-numeric or out-of-range, mark as unavailable (null) with no invented defaults.
-      let potentialScore: number | null = null;
-      let scoreSource: 'model' | 'deterministic' | 'unavailable' = 'unavailable';
+        const diff = (['EASY', 'MEDIUM', 'HARD'].includes(item.difficulty) ? item.difficulty : 'MEDIUM') as 'EASY' | 'MEDIUM' | 'HARD';
 
-      if (
-        typeof item.potentialScore === 'number' &&
-        !Number.isNaN(item.potentialScore) &&
-        Number.isFinite(item.potentialScore) &&
-        item.potentialScore >= 0 &&
-        item.potentialScore <= 100
-      ) {
-        potentialScore = Math.round(item.potentialScore);
-        scoreSource = 'model';
-      } else {
-        potentialScore = null;
-        scoreSource = 'unavailable';
+        // Truthful score contract: preserve valid model score without artificial upward clamping;
+        // if missing, null, non-numeric or out-of-range, mark as unavailable (null) with no invented defaults.
+        let potentialScore: number | null = null;
+        let scoreSource: 'model' | 'deterministic' | 'unavailable' = 'unavailable';
+
+        if (
+          typeof item.potentialScore === 'number' &&
+          !Number.isNaN(item.potentialScore) &&
+          Number.isFinite(item.potentialScore) &&
+          item.potentialScore >= 0 &&
+          item.potentialScore <= 100
+        ) {
+          potentialScore = Math.round(item.potentialScore);
+          scoreSource = 'model';
+        } else {
+          potentialScore = null;
+          scoreSource = 'unavailable';
+        }
+
+        const origScore = typeof item.originalityScore === 'number' && Number.isFinite(item.originalityScore) && item.originalityScore >= 0 && item.originalityScore <= 100
+          ? Math.round(item.originalityScore)
+          : 85;
+        const visScore = typeof item.visualPotentialScore === 'number' && Number.isFinite(item.visualPotentialScore) && item.visualPotentialScore >= 0 && item.visualPotentialScore <= 100
+          ? Math.round(item.visualPotentialScore)
+          : 85;
+
+        validated.push({
+          title: item.title.trim().slice(0, 200),
+          premise: item.premise.trim().slice(0, 1000),
+          category: item.category.trim().slice(0, 100),
+          potentialScore,
+          originalityScore: origScore,
+          visualPotentialScore: visScore,
+          difficulty: diff,
+          audienceFit: typeof item.audienceFit === 'string' && item.audienceFit.trim()
+            ? item.audienceFit.trim().slice(0, 300)
+            : `Targeted for fans of ${brand.name || 'performing arts'}.`,
+          tags: Array.isArray(item.tags)
+            ? item.tags.map((t: any) => String(t).trim().slice(0, 50)).filter(Boolean).slice(0, 6)
+            : [brand.niche || 'Performance'],
+          scoreSource,
+          metadata: Object.freeze({
+            provider: 'ollama',
+            fallbackOccurred: false,
+            model: this.model,
+            latencyMs,
+            reservationId,
+          }),
+        });
       }
 
-      const origScore = typeof item.originalityScore === 'number' && Number.isFinite(item.originalityScore) && item.originalityScore >= 0 && item.originalityScore <= 100
-        ? Math.round(item.originalityScore)
-        : 85;
-      const visScore = typeof item.visualPotentialScore === 'number' && Number.isFinite(item.visualPotentialScore) && item.visualPotentialScore >= 0 && item.visualPotentialScore <= 100
-        ? Math.round(item.visualPotentialScore)
-        : 85;
+      if (validated.length === 0) {
+        throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Model produced empty ideas array', 'COMPLETED_WITH_RESPONSE');
+      }
 
-      validated.push({
-        title: item.title.trim().slice(0, 200),
-        premise: item.premise.trim().slice(0, 1000),
-        category: item.category.trim().slice(0, 100),
-        potentialScore,
-        originalityScore: origScore,
-        visualPotentialScore: visScore,
-        difficulty: diff,
-        audienceFit: typeof item.audienceFit === 'string' && item.audienceFit.trim()
-          ? item.audienceFit.trim().slice(0, 300)
-          : `Targeted for fans of ${brand.name || 'performing arts'}.`,
-        tags: Array.isArray(item.tags)
-          ? item.tags.map((t: any) => String(t).trim().slice(0, 50)).filter(Boolean).slice(0, 6)
-          : [brand.niche || 'Performance'],
-        scoreSource,
+      return validated.slice(0, count);
+    });
+  }
+
+  async generateStory(brand: BrandContext, topic: string, customPremise?: string, character?: CharacterContext, userId?: number): Promise<GeneratedStory> {
+    const ownerId = userId ? `user:${userId}` : ((brand as any).ownerId ? `user:${(brand as any).ownerId}` : (brand.id ? `brand:${brand.id}` : 'system:llm'));
+    return this.executeWithCoordination('generateStory', ownerId, { brandId: brand.id, topic, userId }, async (reservationId) => {
+      const tone = brand.tone || 'elegant, confident, moody, sensual but classy';
+      const visualStyle = brand.visualStyle || 'Dramatic stage lighting, deep shadows, rich textures, 9:16 vertical composition';
+
+      // RAG Context Retrieval — strictly scoped to authenticated tenant
+      let retrievedMudraText = 'fluid hand choreography and expressive eye contact';
+      let retrievedChoreoMovement = 'dynamic, high-precision dance movement, trailing motion blur';
+      let retrievedHookText = 'They say the stage only reveals its true secret when the final spotlight cuts through the silence.';
+
+      if (this.ragEngine) {
+        const targetUserId = userId ?? (brand as any).ownerId;
+        const query = `${topic} ${brand.niche || ''} ${character?.personality || ''} ${character?.appearance || ''}`;
+        const mudraResults = this.ragEngine.search(query, { userId: targetUserId, category: 'CHOREOGRAPHY', limit: 2 });
+        if (mudraResults.length > 0) {
+          retrievedMudraText = `${mudraResults[0].item.title} (${mudraResults[0].item.content.split('.')[0]})`;
+          if (mudraResults.length > 1) {
+            retrievedChoreoMovement = `${mudraResults[1].item.title}, executing ${mudraResults[1].item.content.split('.')[0]}`;
+          }
+        }
+
+        const hookResults = this.ragEngine.search(query, { userId: targetUserId, category: 'VIRAL_HOOKS', limit: 1 });
+        if (hookResults.length > 0) {
+          retrievedHookText = `${hookResults[0].item.content.split('.')[0]}.`;
+        }
+      }
+
+      const charDesc = character
+        ? `${character.name}, a solo performer with ${character.appearance || 'striking sculpted features and magnetic gaze'}, wearing ${character.clothingStyle || 'a midnight crimson silk gown'}, ${character.personality || 'confident and graceful'}`
+        : `a world-class solo dancer in elegant theatrical stage attire`;
+
+      const premise = customPremise || `An atmospheric 45-second performance featuring ${character?.name || 'the solo dancer'} uncovering a mesmerizing choreography piece under dramatic spotlighting, capturing intense suspense and artistry.`;
+
+      const systemPrompt = [
+        'You are a cinematic cultural storyboard director.',
+        'Generate a structured 5-scene vertical (9:16) video narrative strictly matching the JSON Schema.',
+        'Each scene must specify realistic duration in seconds (between 4 and 15 seconds per scene, totaling approximately 35-60 seconds).',
+        'Provide detailed, photorealistic visualPrompts, clear narration, and precise voice directions.',
+      ].join(' ');
+
+      const userPrompt = [
+        `Brand: "${brand.name || 'Studio'}" (${brand.niche || 'Dance'})`,
+        `Topic: "${topic}"`,
+        `Premise: "${premise}"`,
+        `Visual Style: "${visualStyle}"`,
+        `Tone: "${tone}"`,
+        `Protagonist Description: ${charDesc}`,
+        `Authentic Choreography Notes (retrieved from verified knowledge store):`,
+        `- Movement Accent 1: ${retrievedMudraText}`,
+        `- Movement Accent 2: ${retrievedChoreoMovement}`,
+        `- Atmospheric Hook Note: ${retrievedHookText}`,
+        'Produce a 5-scene cinematic storyboard structured according to the JSON Schema.',
+      ].join('\n');
+
+      const startTime = Date.now();
+      const parsed = await this.callChat([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ], STORY_JSON_SCHEMA);
+
+      if (!parsed || !Array.isArray(parsed.scenes) || parsed.scenes.length === 0) {
+        throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Story missing scenes array or scenes array is empty', 'COMPLETED_WITH_RESPONSE');
+      }
+
+      if (parsed.scenes.length > 10) {
+        throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Story exceeded maximum allowed scene count (10)', 'COMPLETED_WITH_RESPONSE');
+      }
+
+      const scenes: GeneratedStoryScene[] = [];
+      for (let i = 0; i < parsed.scenes.length; i++) {
+        const sc = parsed.scenes[i];
+        if (typeof sc !== 'object' || sc === null) {
+          throw new SanitizedLLMError('LLM_INVALID_OUTPUT', `Scene ${i + 1} is not an object`, 'COMPLETED_WITH_RESPONSE');
+        }
+
+        if (
+          typeof sc.narration !== 'string' ||
+          sc.narration.trim().length === 0 ||
+          typeof sc.visualPrompt !== 'string' ||
+          sc.visualPrompt.trim().length === 0 ||
+          typeof sc.voiceDirection !== 'string' ||
+          sc.voiceDirection.trim().length === 0
+        ) {
+          throw new SanitizedLLMError(
+            'LLM_INVALID_OUTPUT',
+            `Scene ${i + 1} missing required fields (narration, visualPrompt, voiceDirection)`,
+            'COMPLETED_WITH_RESPONSE'
+          );
+        }
+
+        // Clamp scene duration reasonably (4 to 30 seconds)
+        const rawDur = typeof sc.durationSec === 'number' && !isNaN(sc.durationSec) ? Math.round(sc.durationSec) : 8;
+        const durationSec = Math.min(30, Math.max(4, rawDur));
+
+        scenes.push({
+          sceneOrder: typeof sc.sceneOrder === 'number' ? sc.sceneOrder : i + 1,
+          durationSec,
+          narration: sc.narration.trim(),
+          dialogue: typeof sc.dialogue === 'string' && sc.dialogue.trim() ? sc.dialogue.trim() : undefined,
+          visualPrompt: sc.visualPrompt.trim(),
+          voiceDirection: sc.voiceDirection.trim(),
+          soundEffects: typeof sc.soundEffects === 'string' && sc.soundEffects.trim() ? sc.soundEffects.trim() : undefined,
+          musicDirection: typeof sc.musicDirection === 'string' && sc.musicDirection.trim() ? sc.musicDirection.trim() : undefined,
+          endingType: typeof sc.endingType === 'string' && sc.endingType.trim() ? sc.endingType.trim() : undefined,
+        });
+      }
+
+      const totalDuration = scenes.reduce((acc, s) => acc + s.durationSec, 0);
+
+      return {
+        title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : `${brand.name || 'Studio'} — ${topic}`,
+        hook: typeof parsed.hook === 'string' && parsed.hook.trim() ? parsed.hook.trim() : scenes[0].narration,
+        premise: typeof parsed.premise === 'string' && parsed.premise.trim() ? parsed.premise.trim() : premise,
+        targetDurationSec: totalDuration,
+        language: typeof parsed.language === 'string' && parsed.language.trim() ? parsed.language.trim() : (brand.language || 'English'),
+        tone: typeof parsed.tone === 'string' && parsed.tone.trim() ? parsed.tone.trim() : tone,
+        endingType: typeof parsed.endingType === 'string' && parsed.endingType.trim() ? parsed.endingType.trim() : 'Call to Action',
+        scenes,
         metadata: Object.freeze({
           provider: 'ollama',
           fallbackOccurred: false,
           model: this.model,
-          latencyMs,
+          latencyMs: Date.now() - startTime,
+          reservationId,
         }),
-      });
-    }
-
-    if (validated.length === 0) {
-      throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Model produced empty ideas array');
-    }
-
-    return validated.slice(0, count);
-  }
-
-  async generateStory(brand: BrandContext, topic: string, customPremise?: string, character?: CharacterContext, userId?: number): Promise<GeneratedStory> {
-    const tone = brand.tone || 'elegant, confident, moody, sensual but classy';
-    const visualStyle = brand.visualStyle || 'Dramatic stage lighting, deep shadows, rich textures, 9:16 vertical composition';
-
-    // RAG Context Retrieval — strictly scoped to authenticated tenant
-    let retrievedMudraText = 'fluid hand choreography and expressive eye contact';
-    let retrievedChoreoMovement = 'dynamic, high-precision dance movement, trailing motion blur';
-    let retrievedHookText = 'They say the stage only reveals its true secret when the final spotlight cuts through the silence.';
-
-    if (this.ragEngine) {
-      const targetUserId = userId ?? (brand as any).ownerId;
-      const query = `${topic} ${brand.niche || ''} ${character?.personality || ''} ${character?.appearance || ''}`;
-      const mudraResults = this.ragEngine.search(query, { userId: targetUserId, category: 'CHOREOGRAPHY', limit: 2 });
-      if (mudraResults.length > 0) {
-        retrievedMudraText = `${mudraResults[0].item.title} (${mudraResults[0].item.content.split('.')[0]})`;
-        if (mudraResults.length > 1) {
-          retrievedChoreoMovement = `${mudraResults[1].item.title}, executing ${mudraResults[1].item.content.split('.')[0]}`;
-        }
-      }
-
-      const hookResults = this.ragEngine.search(query, { userId: targetUserId, category: 'VIRAL_HOOKS', limit: 1 });
-      if (hookResults.length > 0) {
-        retrievedHookText = `${hookResults[0].item.content.split('.')[0]}.`;
-      }
-    }
-
-    const charDesc = character
-      ? `${character.name}, a solo performer with ${character.appearance || 'striking sculpted features and magnetic gaze'}, wearing ${character.clothingStyle || 'a midnight crimson silk gown'}, ${character.personality || 'confident and graceful'}`
-      : `a world-class solo dancer in elegant theatrical stage attire`;
-
-    const premise = customPremise || `An atmospheric 45-second performance featuring ${character?.name || 'the solo dancer'} uncovering a mesmerizing choreography piece under dramatic spotlighting, capturing intense suspense and artistry.`;
-
-    const systemPrompt = [
-      'You are a cinematic cultural storyboard director.',
-      'Generate a structured 5-scene vertical (9:16) video narrative strictly matching the JSON Schema.',
-      'Each scene must specify realistic duration in seconds (between 4 and 15 seconds per scene, totaling approximately 35-60 seconds).',
-      'Provide detailed, photorealistic visualPrompts, clear narration, and precise voice directions.',
-    ].join(' ');
-
-    const userPrompt = [
-      `Brand: "${brand.name || 'Studio'}" (${brand.niche || 'Dance'})`,
-      `Topic: "${topic}"`,
-      `Premise: "${premise}"`,
-      `Visual Style: "${visualStyle}"`,
-      `Tone: "${tone}"`,
-      `Protagonist Description: ${charDesc}`,
-      `Authentic Choreography Notes (retrieved from verified knowledge store):`,
-      `- Movement Accent 1: ${retrievedMudraText}`,
-      `- Movement Accent 2: ${retrievedChoreoMovement}`,
-      `- Atmospheric Hook Note: ${retrievedHookText}`,
-      'Produce a 5-scene cinematic storyboard structured according to the JSON Schema.',
-    ].join('\n');
-
-    const startTime = Date.now();
-    const parsed = await this.callChat([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ], STORY_JSON_SCHEMA);
-
-    if (!parsed || !Array.isArray(parsed.scenes) || parsed.scenes.length === 0) {
-      throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Story missing scenes array or scenes array is empty');
-    }
-
-    if (parsed.scenes.length > 10) {
-      throw new SanitizedLLMError('LLM_INVALID_OUTPUT', 'Story exceeded maximum allowed scene count (10)');
-    }
-
-    const scenes: GeneratedStoryScene[] = [];
-    for (let i = 0; i < parsed.scenes.length; i++) {
-      const sc = parsed.scenes[i];
-      if (typeof sc !== 'object' || sc === null) {
-        throw new SanitizedLLMError('LLM_INVALID_OUTPUT', `Scene ${i + 1} is not an object`);
-      }
-
-      if (
-        typeof sc.narration !== 'string' ||
-        sc.narration.trim().length === 0 ||
-        typeof sc.visualPrompt !== 'string' ||
-        sc.visualPrompt.trim().length === 0 ||
-        typeof sc.voiceDirection !== 'string' ||
-        sc.voiceDirection.trim().length === 0
-      ) {
-        throw new SanitizedLLMError(
-          'LLM_INVALID_OUTPUT',
-          `Scene ${i + 1} missing required fields (narration, visualPrompt, voiceDirection)`
-        );
-      }
-
-      // Clamp scene duration reasonably (4 to 30 seconds)
-      const rawDur = typeof sc.durationSec === 'number' && !isNaN(sc.durationSec) ? Math.round(sc.durationSec) : 8;
-      const durationSec = Math.min(30, Math.max(4, rawDur));
-
-      scenes.push({
-        sceneOrder: typeof sc.sceneOrder === 'number' ? sc.sceneOrder : i + 1,
-        durationSec,
-        narration: sc.narration.trim(),
-        dialogue: typeof sc.dialogue === 'string' && sc.dialogue.trim() ? sc.dialogue.trim() : undefined,
-        visualPrompt: sc.visualPrompt.trim(),
-        voiceDirection: sc.voiceDirection.trim(),
-        soundEffects: typeof sc.soundEffects === 'string' && sc.soundEffects.trim() ? sc.soundEffects.trim() : undefined,
-        musicDirection: typeof sc.musicDirection === 'string' && sc.musicDirection.trim() ? sc.musicDirection.trim() : undefined,
-        endingType: typeof sc.endingType === 'string' && sc.endingType.trim() ? sc.endingType.trim() : undefined,
-      });
-    }
-
-    const totalDuration = scenes.reduce((acc, s) => acc + s.durationSec, 0);
-
-    return {
-      title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : `${brand.name || 'Studio'} — ${topic}`,
-      hook: typeof parsed.hook === 'string' && parsed.hook.trim() ? parsed.hook.trim() : scenes[0].narration,
-      premise: typeof parsed.premise === 'string' && parsed.premise.trim() ? parsed.premise.trim() : premise,
-      targetDurationSec: totalDuration,
-      language: typeof parsed.language === 'string' && parsed.language.trim() ? parsed.language.trim() : (brand.language || 'English'),
-      tone: typeof parsed.tone === 'string' && parsed.tone.trim() ? parsed.tone.trim() : tone,
-      endingType: typeof parsed.endingType === 'string' && parsed.endingType.trim() ? parsed.endingType.trim() : 'Call to Action',
-      scenes,
-      metadata: Object.freeze({
-        provider: 'ollama',
-        fallbackOccurred: false,
-        model: this.model,
-        latencyMs: Date.now() - startTime,
-      }),
-    };
+      };
+    });
   }
 
   async unloadModel(): Promise<boolean> {
@@ -700,6 +892,7 @@ export class FallbackLLMProvider implements LLMProvider {
         console.warn(`[LLM Fallback] Primary provider failed (${sanitized.code}). Falling back to deterministic provider.`);
       }
 
+      const resvId = (err as any)?.reservationId;
       try {
         const fallbackResults = await this.fallback.generateIdeas(brand, count);
         const latencyMs = Date.now() - startTime;
@@ -707,6 +900,8 @@ export class FallbackLLMProvider implements LLMProvider {
           provider: 'deterministic',
           fallbackOccurred: true,
           fallbackReason: sanitized.code,
+          reservationId: resvId,
+          errorEvidence: (err as any)?.errorEvidence || (sanitized as any)?.evidence,
           latencyMs,
         });
         return fallbackResults.map((r) => ({
@@ -744,6 +939,7 @@ export class FallbackLLMProvider implements LLMProvider {
         console.warn(`[LLM Fallback] Primary provider failed (${sanitized.code}). Falling back to deterministic provider.`);
       }
 
+      const resvId = (err as any)?.reservationId;
       try {
         const fallbackStory = await this.fallback.generateStory(brand, topic, customPremise, character, userId);
         const latencyMs = Date.now() - startTime;
@@ -751,6 +947,8 @@ export class FallbackLLMProvider implements LLMProvider {
           provider: 'deterministic',
           fallbackOccurred: true,
           fallbackReason: sanitized.code,
+          reservationId: resvId,
+          errorEvidence: (err as any)?.errorEvidence || (sanitized as any)?.evidence,
           latencyMs,
         });
         return {
@@ -770,6 +968,8 @@ export function createDefaultLLMProvider(
     enableOllama?: boolean;
     ollamaOptions?: OllamaProviderOptions;
     onFallback?: (err: SanitizedLLMError, method: string) => void;
+    coordinator?: ResourceCoordinator;
+    lifecycleAdapter?: OllamaLifecycleAdapter;
   }
 ): LLMProvider {
   const localFallback = new LocalLLMProvider(ragEngine);
@@ -783,6 +983,12 @@ export function createDefaultLLMProvider(
     return localFallback;
   }
 
-  const ollamaProvider = new OllamaLLMProvider(ragEngine, options?.ollamaOptions);
+  const mergedOllamaOptions: OllamaProviderOptions = {
+    ...options?.ollamaOptions,
+    coordinator: options?.ollamaOptions?.coordinator ?? options?.coordinator,
+    lifecycleAdapter: options?.ollamaOptions?.lifecycleAdapter ?? options?.lifecycleAdapter,
+  };
+
+  const ollamaProvider = new OllamaLLMProvider(ragEngine, mergedOllamaOptions);
   return new FallbackLLMProvider(ollamaProvider, localFallback, options?.onFallback);
 }

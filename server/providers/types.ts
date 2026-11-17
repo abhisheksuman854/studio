@@ -22,12 +22,22 @@ export interface BrandContext {
   };
 }
 
+export type LLMErrorEvidence =
+  | 'NOT_DISPATCHED'
+  | 'REJECTED_BEFORE_INFERENCE'
+  | 'COMPLETED_WITH_RESPONSE'
+  | 'TERMINATION_VERIFIED'
+  | 'TERMINATION_UNCERTAIN';
+
 export interface LLMExecutionMetadata {
   readonly provider: 'ollama' | 'deterministic' | string;
   readonly fallbackOccurred: boolean;
   readonly model?: string;
   readonly fallbackReason?: string;
   readonly latencyMs?: number;
+  readonly reservationId?: string;
+  readonly lifecycleOutcome?: string;
+  readonly errorEvidence?: LLMErrorEvidence;
 }
 
 export interface IdeaItem {
