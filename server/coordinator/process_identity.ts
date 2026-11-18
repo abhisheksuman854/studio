@@ -17,6 +17,9 @@ export interface ProcessIdentity {
   readonly processInstanceId: string; // Format: proc_<pid>_<timestamp>_<uuid>
   readonly pid: number;
   readonly pgid?: number;
+  readonly pgidVerificationState?: 'UNVERIFIED' | 'OS_VERIFIED';
+  readonly hasConflict?: boolean;
+  readonly conflictReason?: string;
   readonly processStartedAt: number;
   readonly lstart?: string;
   readonly reservationCreatedAt?: number;
@@ -92,13 +95,237 @@ export type ProcessGroupLivenessState =
   | 'UNKNOWN'
   | 'ERROR';
 
+export interface ProcessGroupIdentityRecord {
+  readonly pgid?: number;
+  readonly pgidVerificationState: 'UNVERIFIED' | 'OS_VERIFIED';
+  readonly source: 'WORKER_IDENTITY' | 'RESERVATION_METADATA' | 'NONE';
+  readonly hasConflict: boolean;
+  readonly conflictReason?: string;
+}
+
+/**
+ * Atomically resolves PGID and its verification provenance from identity metadata.
+ * Enforces Remediation A & Phase 2.3.3.1.12 invariants:
+ * 1. A PGID must never inherit provenance from a different metadata source.
+ * 2. Conflicting metadata across workerIdentity and reservation metadata strictly fails closed.
+ * 3. Conflicting or malformed aliases within the same metadata source strictly fail closed.
+ * 4. Incomplete sources (e.g. unanchored provenance without PGID) cannot pair with another source.
+ * 5. Legacy records without explicit provenance remain UNVERIFIED.
+ * 6. Invalid PGIDs (<=0, floats, NaN, non-integers) are rejected.
+ */
+export function resolveProcessGroupIdentity(
+  workerIdentity?: { childPgid?: number | null; pgid?: number | null; pgidVerificationState?: 'UNVERIFIED' | 'OS_VERIFIED' | string } | null,
+  meta?: { childPgid?: number | null; pgid?: number | null; pgidVerificationState?: 'UNVERIFIED' | 'OS_VERIFIED' | string } | null
+): ProcessGroupIdentityRecord {
+  function isPresent(val: unknown): boolean {
+    return val !== undefined && val !== null;
+  }
+
+  function isValidPositiveInteger(val: unknown): val is number {
+    return typeof val === 'number' && Number.isInteger(val) && val > 0;
+  }
+
+  // 1. Parse and validate workerIdentity candidate aliases (Phase 2.3.3.1.14)
+  const rawWiChildPgid = workerIdentity?.childPgid;
+  const rawWiPgid = (workerIdentity as any)?.pgid;
+  const hasWiChildPgid = isPresent(rawWiChildPgid);
+  const hasWiPgid = isPresent(rawWiPgid);
+
+  let wiPgid: number | undefined;
+  if (hasWiChildPgid && hasWiPgid) {
+    const wiChildValid = isValidPositiveInteger(rawWiChildPgid);
+    const wiPgidValid = isValidPositiveInteger(rawWiPgid);
+    if (!wiChildValid || !wiPgidValid) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Invalid metadata: malformed PGID alias in workerIdentity',
+      };
+    }
+    if (rawWiChildPgid !== rawWiPgid) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Conflicting workerIdentity PGID aliases: childPgid does not match pgid',
+      };
+    }
+    wiPgid = rawWiChildPgid;
+  } else if (hasWiChildPgid) {
+    if (!isValidPositiveInteger(rawWiChildPgid)) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Invalid metadata: malformed PGID alias in workerIdentity',
+      };
+    }
+    wiPgid = rawWiChildPgid;
+  } else if (hasWiPgid) {
+    if (!isValidPositiveInteger(rawWiPgid)) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Invalid metadata: malformed PGID alias in workerIdentity',
+      };
+    }
+    wiPgid = rawWiPgid;
+  }
+
+  const wiState: 'UNVERIFIED' | 'OS_VERIFIED' =
+    workerIdentity?.pgidVerificationState === 'OS_VERIFIED' ? 'OS_VERIFIED' : 'UNVERIFIED';
+  const wiHasPgid = wiPgid !== undefined;
+
+  // 2. Parse and validate reservation metadata candidate aliases (Phase 2.3.3.1.14)
+  const rawMetaChildPgid = meta?.childPgid;
+  const rawMetaPgid = meta?.pgid;
+  const hasMetaChildPgid = isPresent(rawMetaChildPgid);
+  const hasMetaPgid = isPresent(rawMetaPgid);
+
+  let metaPgid: number | undefined;
+  if (hasMetaChildPgid && hasMetaPgid) {
+    const metaChildValid = isValidPositiveInteger(rawMetaChildPgid);
+    const metaPgidValid = isValidPositiveInteger(rawMetaPgid);
+    if (!metaChildValid || !metaPgidValid) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Invalid metadata: malformed PGID alias in reservation metadata',
+      };
+    }
+    if (rawMetaChildPgid !== rawMetaPgid) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Conflicting metadata PGID aliases: childPgid does not match pgid',
+      };
+    }
+    metaPgid = rawMetaChildPgid;
+  } else if (hasMetaChildPgid) {
+    if (!isValidPositiveInteger(rawMetaChildPgid)) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Invalid metadata: malformed PGID alias in reservation metadata',
+      };
+    }
+    metaPgid = rawMetaChildPgid;
+  } else if (hasMetaPgid) {
+    if (!isValidPositiveInteger(rawMetaPgid)) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: 'Invalid metadata: malformed PGID alias in reservation metadata',
+      };
+    }
+    metaPgid = rawMetaPgid;
+  }
+
+  const metaState: 'UNVERIFIED' | 'OS_VERIFIED' =
+    meta?.pgidVerificationState === 'OS_VERIFIED' ? 'OS_VERIFIED' : 'UNVERIFIED';
+  const metaHasPgid = metaPgid !== undefined;
+
+  // 3. Detect unanchored provenance without valid PGID (independent validation, Phase 2.3.3.1.14)
+  if (meta?.pgidVerificationState === 'OS_VERIFIED' && !metaHasPgid) {
+    return {
+      pgid: undefined,
+      pgidVerificationState: 'UNVERIFIED',
+      source: 'NONE',
+      hasConflict: true,
+      conflictReason: 'Reservation metadata contains unanchored OS_VERIFIED provenance without valid PGID',
+    };
+  }
+
+  if (workerIdentity?.pgidVerificationState === 'OS_VERIFIED' && !wiHasPgid) {
+    return {
+      pgid: undefined,
+      pgidVerificationState: 'UNVERIFIED',
+      source: 'NONE',
+      hasConflict: true,
+      conflictReason: 'Worker identity contains unanchored OS_VERIFIED provenance without valid PGID',
+    };
+  }
+
+  // 4. Both sources define a PGID
+  if (wiHasPgid && metaHasPgid) {
+    if (wiPgid !== metaPgid) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: `Conflicting PGIDs: workerIdentity (${wiPgid}) does not match metadata (${metaPgid})`,
+      };
+    }
+
+    if (wiState !== metaState) {
+      return {
+        pgid: undefined,
+        pgidVerificationState: 'UNVERIFIED',
+        source: 'NONE',
+        hasConflict: true,
+        conflictReason: `Conflicting provenance: workerIdentity is ${wiState} but metadata is ${metaState}`,
+      };
+    }
+
+    return {
+      pgid: wiPgid,
+      pgidVerificationState: wiState,
+      source: 'WORKER_IDENTITY',
+      hasConflict: false,
+    };
+  }
+
+  // 5. Only workerIdentity defines a PGID
+  if (wiHasPgid && !metaHasPgid) {
+    return {
+      pgid: wiPgid,
+      pgidVerificationState: wiState,
+      source: 'WORKER_IDENTITY',
+      hasConflict: false,
+    };
+  }
+
+  // 6. Only reservation metadata defines a PGID
+  if (!wiHasPgid && metaHasPgid) {
+    return {
+      pgid: metaPgid,
+      pgidVerificationState: metaState,
+      source: 'RESERVATION_METADATA',
+      hasConflict: false,
+    };
+  }
+
+  // 7. Neither source defines a valid PGID
+  return {
+    pgid: undefined,
+    pgidVerificationState: 'UNVERIFIED',
+    source: 'NONE',
+    hasConflict: false,
+  };
+}
+
 /**
  * Detailed POSIX process group inspection.
  * Distinguishes empty groups, zombie-only groups, and groups with active living execution.
  */
 export async function checkProcessGroupLiveness(pgid: number | undefined): Promise<ProcessGroupLivenessState> {
-  if (!pgid || pgid <= 0 || process.platform === 'win32') {
-    return 'EMPTY';
+  if (!pgid || pgid <= 0 || !Number.isInteger(pgid) || process.platform === 'win32') {
+    return 'UNKNOWN';
   }
   if (pgid === process.pid) {
     return 'LIVE_MEMBERS';
@@ -149,8 +376,8 @@ export async function checkProcessGroupLiveness(pgid: number | undefined): Promi
  * Uses native POSIX kill(-pgid, 0) syscall without spawning external binaries.
  */
 export function isProcessGroupAlive(pgid: number): boolean | 'UNKNOWN' {
-  if (!pgid || pgid <= 0 || process.platform === 'win32') {
-    return false;
+  if (!pgid || pgid <= 0 || !Number.isInteger(pgid) || process.platform === 'win32') {
+    return 'UNKNOWN';
   }
   if (pgid === process.pid) {
     return true;
@@ -241,6 +468,134 @@ export async function getProcessSnapshot(pid: number): Promise<OSProcessSnapshot
   }
 }
 
+export const MAX_SNAPSHOT_DIAGNOSTIC_LENGTH = 256;
+
+/**
+ * Safely formats a snapshot property value (such as state, PID, or PGID) for diagnostic output,
+ * guaranteeing bounded length and preventing unhandled exceptions when encountering Symbols,
+ * hostile objects, functions, or unprintable types.
+ */
+export function formatSnapshotState(value: unknown): string {
+  try {
+    if (typeof value === 'string') {
+      if (value.length <= 64) {
+        return value;
+      }
+      return value.slice(0, 60) + '...';
+    }
+    if (typeof value === 'symbol') {
+      return 'Symbol';
+    }
+    if (typeof value === 'bigint') {
+      return '[bigint]';
+    }
+    if (typeof value === 'function') {
+      return '[function]';
+    }
+    if (typeof value === 'number') {
+      if (Number.isFinite(value)) {
+        return String(value).slice(0, 32);
+      }
+      return String(value);
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+    if (value === null) {
+      return 'null';
+    }
+    if (value === undefined) {
+      return 'undefined';
+    }
+    if (Array.isArray(value)) {
+      return '[object]';
+    }
+    if (typeof value === 'object') {
+      return '[object]';
+    }
+  } catch {
+    return '[unprintable]';
+  }
+  return '[unprintable]';
+}
+
+/**
+ * Enforces bounded maximum length on validator diagnostic reason strings.
+ */
+function clampDiagnostic(reason: string, maxLength: number = MAX_SNAPSHOT_DIAGNOSTIC_LENGTH): string {
+  try {
+    if (typeof reason !== 'string') {
+      return 'Snapshot validation failed';
+    }
+    if (reason.length <= maxLength) {
+      return reason;
+    }
+    return reason.slice(0, maxLength);
+  } catch {
+    return 'Snapshot validation failed';
+  }
+}
+
+function makeInvalidResult(reason: string): { isValid: false; pgid: undefined; reason: string } {
+  return {
+    isValid: false,
+    pgid: undefined,
+    reason: clampDiagnostic(reason),
+  };
+}
+
+/**
+ * Strictly validates an OS process snapshot against the expected child process at spawn.
+ * Enforces Remediation C and Phase 2.3.3.1.20 invariants:
+ * Validates returned PID, PGID, and state eligibility.
+ * All invalid outcomes return safe, bounded diagnostics (<= 256 chars) without throwing exceptions.
+ */
+export function validateSpawnSnapshot(
+  expectedPid: number,
+  snap: OSProcessSnapshot | null | undefined
+): { isValid: boolean; pgid?: number; reason?: string } {
+  try {
+    if (!snap || typeof snap !== 'object') {
+      return makeInvalidResult('Snapshot is missing or not an object');
+    }
+
+    let pid: unknown;
+    let pgid: unknown;
+    let state: unknown;
+    try {
+      pid = snap.pid;
+      pgid = snap.pgid;
+      state = snap.state;
+    } catch {
+      return makeInvalidResult('Snapshot properties could not be inspected');
+    }
+
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+      return makeInvalidResult(`Invalid snapshot PID: ${formatSnapshotState(pid)}`);
+    }
+    if (typeof pgid !== 'number' || !Number.isInteger(pgid) || pgid <= 0) {
+      return makeInvalidResult(`Invalid snapshot PGID: ${formatSnapshotState(pgid)}`);
+    }
+    if (pid !== expectedPid) {
+      return makeInvalidResult(`Snapshot PID ${pid} does not match expected PID ${expectedPid}`);
+    }
+    if (pgid !== expectedPid) {
+      return makeInvalidResult(`Snapshot PGID ${pgid} does not match expected PID ${expectedPid}`);
+    }
+    if (state !== 'RUNNING' && state !== 'SLEEPING') {
+      const detail = state === 'ZOMBIE'
+        ? 'Snapshot process is already a zombie'
+        : state === 'UNKNOWN'
+        ? 'Snapshot process state is UNKNOWN'
+        : `Snapshot process state '${formatSnapshotState(state)}' is not eligible for verification`;
+      return makeInvalidResult(detail);
+    }
+    return { isValid: true, pgid: pgid as number };
+  } catch {
+    return makeInvalidResult('Snapshot validation failed');
+  }
+}
+
 /**
  * Validates whether an active OS process genuinely corresponds to the expected managed worker.
  * Prevents targeting recycled PIDs or unrelated operating system processes.
@@ -249,6 +604,16 @@ export function verifyProcessIdentity(
   expected: ProcessIdentity,
   snapshot: OSProcessSnapshot | null
 ): ProcessVerificationResult {
+  if (expected.hasConflict) {
+    return {
+      status: 'MISMATCH',
+      isAlive: true,
+      canSignal: false,
+      reason: `Process identity metadata has conflict: ${expected.conflictReason || 'Conflicting PGID/provenance'}`,
+      snapshot,
+    };
+  }
+
   if (!snapshot) {
     const isAlive = isProcessAliveSync(expected.pid);
     if (isAlive === true) {
@@ -416,10 +781,56 @@ export function sendVerifiedSignal(
     });
   }
 
+  // Mode B Process-Group Authorization Guard (Remediation B):
+  // Strictly requires all 6 conditions:
+  // 1. Valid positive integer PGID > 1
+  // 2. Not win32
+  // 3. opts.useProcessGroup === true
+  // 4. opts.expectedIdentity?.pgidVerificationState === 'OS_VERIFIED'
+  // 5. opts.expectedIdentity?.pgid === pgid
+  // 6. opts.expectedIdentity?.hasConflict !== true
+  const canAuthorizeGroup = Boolean(
+    opts.useProcessGroup === true &&
+    typeof pgid === 'number' &&
+    Number.isInteger(pgid) &&
+    pgid > 1 &&
+    process.platform !== 'win32' &&
+    opts.expectedIdentity?.pgidVerificationState === 'OS_VERIFIED' &&
+    opts.expectedIdentity?.pgid === pgid &&
+    opts.expectedIdentity?.hasConflict !== true
+  );
+
+  // Mode A Direct-Child Handle Guard:
+  const hasOwnedChild = Boolean(
+    opts.childProcess &&
+    typeof opts.childProcess.pid === 'number' &&
+    opts.childProcess.pid === pid &&
+    opts.childProcess.exitCode === null &&
+    opts.childProcess.signalCode === null
+  );
+
+  // Synchronous fail-closed checks for metadata conflicts and unauthorized group signaling
+  if (opts.expectedIdentity?.hasConflict === true) {
+    return makeResult({
+      success: false,
+      deliveredToGroup: false,
+      error: `Process identity conflict: ${opts.expectedIdentity.conflictReason || 'Conflicting PGID/provenance'}`,
+      identityStatus: 'MISMATCH',
+    });
+  }
+
+  if (opts.useProcessGroup && !canAuthorizeGroup && !hasOwnedChild) {
+    return makeResult({
+      success: false,
+      deliveredToGroup: false,
+      error: `Process-group signaling unauthorized: PGID ${pgid ?? 'missing'} is not OS_VERIFIED or metadata has conflict`,
+    });
+  }
+
   // 2. Dispatch execution helper
   function doDispatch(): SendSignalResult {
-    // Attempt process group signaling on POSIX if requested and pgid is valid
-    if (opts.useProcessGroup && pgid && pgid > 1 && process.platform !== 'win32') {
+    // Mode B: Process-group signaling (only if explicitly authorized)
+    if (canAuthorizeGroup && pgid) {
       try {
         process.kill(-pgid, signal);
         return { success: true, deliveredToGroup: true };
@@ -431,8 +842,8 @@ export function sendVerifiedSignal(
       }
     }
 
-    // Prefer owned child-process handle if available and still running
-    if (opts.childProcess && opts.childProcess.exitCode === null && opts.childProcess.signalCode === null) {
+    // Mode A: Direct-child handle signaling
+    if (hasOwnedChild) {
       try {
         const delivered = opts.childProcess.kill(signal);
         if (delivered) {
@@ -441,6 +852,15 @@ export function sendVerifiedSignal(
       } catch {
         // Fall through to direct PID
       }
+    }
+
+    // Fail closed if process-group was explicitly requested without owned direct-child handle and group was unauthorized
+    if (opts.useProcessGroup && !canAuthorizeGroup && !hasOwnedChild) {
+      return {
+        success: false,
+        deliveredToGroup: false,
+        error: `Process-group signaling unauthorized: PGID ${pgid ?? 'missing'} is not OS_VERIFIED or metadata has conflict`,
+      };
     }
 
     // Direct PID signaling
@@ -496,7 +916,7 @@ export function sendVerifiedSignal(
 
     // Snapshot not provided: execute asynchronous OS snapshot check
     const asyncPromise = (async (): Promise<SendSignalResult> => {
-      const isGroupTarget = opts.useProcessGroup && pgid && pgid > 1 && process.platform !== 'win32';
+      const isGroupTarget = canAuthorizeGroup && pgid && pgid > 1;
       const alive = isGroupTarget ? isProcessGroupAlive(pgid) === true : isProcessAliveSync(pid);
       if (!alive) {
         return {
@@ -524,7 +944,7 @@ export function sendVerifiedSignal(
         // OS snapshot unavailable (e.g. unprivileged sandbox or ps EPERM)
         // If caller holds the direct childProcess handle OR valid process group identity
         const isOwnedChild = opts.childProcess && opts.childProcess.pid === pid;
-        const isOwnedGroup = isGroupTarget && opts.expectedIdentity?.pgid === pgid;
+        const isOwnedGroup = canAuthorizeGroup && opts.expectedIdentity?.pgid === pgid;
         if (!isOwnedChild && !isOwnedGroup) {
           return {
             success: false,

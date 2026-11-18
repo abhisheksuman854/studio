@@ -25,6 +25,8 @@ import {
   getProcessSnapshot,
   verifyProcessIdentity,
   sendVerifiedSignal,
+  validateSpawnSnapshot,
+  resolveProcessGroupIdentity,
   type ProcessIdentity,
   type OSProcessSnapshot,
   type ProcessGroupLivenessState,
@@ -120,6 +122,7 @@ export class ChildProcessSupervisor extends EventEmitter {
   private childProcess: ChildProcess | null = null;
   private pid?: number;
   private pgid?: number;
+  private pgidVerificationState: 'UNVERIFIED' | 'OS_VERIFIED' = 'UNVERIFIED';
   private processStartedAt = 0;
   private completedAt?: number;
 
@@ -197,6 +200,7 @@ export class ChildProcessSupervisor extends EventEmitter {
       processInstanceId: this.processInstanceId,
       pid: this.pid,
       pgid: this.pgid,
+      pgidVerificationState: this.pgidVerificationState,
       processStartedAt: this.processStartedAt,
       lstart: this.lstart,
       executable: this.config.executable,
@@ -385,18 +389,35 @@ export class ChildProcessSupervisor extends EventEmitter {
           }
 
           this.pid = this.childProcess.pid;
+          // Synchronous fallback for internal in-flight signaling only; remains strictly UNVERIFIED for persistence
           this.pgid = process.platform !== 'win32' ? this.childProcess.pid : undefined;
           this.state = 'RUNNING';
           this.spawnCompleted = true;
           resolveSpawn(this.childProcess);
 
-          // Capture lstart from OS snapshot immediately
+          // Verify PID and PGID and capture lstart from OS snapshot immediately (Remediation C)
+          let pgidVerificationState: 'UNVERIFIED' | 'OS_VERIFIED' = 'UNVERIFIED';
+          let verifiedPgid: number | null = null;
           try {
             const snap = await getProcessSnapshot(this.pid);
             if (snap?.lstart) {
               this.lstart = snap.lstart;
             }
-          } catch {}
+            const validation = validateSpawnSnapshot(this.pid, snap);
+            if (validation.isValid && validation.pgid) {
+              this.pgid = validation.pgid;
+              verifiedPgid = validation.pgid;
+              pgidVerificationState = 'OS_VERIFIED';
+            } else {
+              // Snapshot is missing, invalid, or inconsistent: keep unverified
+              verifiedPgid = null;
+              pgidVerificationState = 'UNVERIFIED';
+            }
+          } catch {
+            verifiedPgid = null;
+            pgidVerificationState = 'UNVERIFIED';
+          }
+          this.pgidVerificationState = pgidVerificationState;
 
           // Persist child worker identity to SQLite immediately (Fix for Critical Finding 1)
           if (this.persistence && this.reservationId) {
@@ -404,6 +425,7 @@ export class ChildProcessSupervisor extends EventEmitter {
               const record = this.persistence.getReservation(this.reservationId);
               const meta = (record?.metadata as Record<string, unknown>) || {};
               const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+              const persistedPgid = (verifiedPgid !== null && verifiedPgid > 0) ? verifiedPgid : (this.pgid ?? null);
 
               const identity: WorkerIdentityMetadata = {
                 requestId: this.requestId,
@@ -411,7 +433,8 @@ export class ChildProcessSupervisor extends EventEmitter {
                 workerType: this.config.workerType,
                 parentPid: process.pid,
                 childPid: this.pid,
-                childPgid: this.pgid ?? null,
+                childPgid: persistedPgid,
+                pgidVerificationState,
                 processStartedAt: this.processStartedAt,
                 lstart: this.lstart,
                 reservationCreatedAt: (existingIdentity.reservationCreatedAt as number) || this.processStartedAt,
@@ -436,7 +459,8 @@ export class ChildProcessSupervisor extends EventEmitter {
                   processInstanceId: this.processInstanceId,
                   workerType: this.config.workerType,
                   childPid: this.pid,
-                  childPgid: this.pgid,
+                  childPgid: persistedPgid,
+                  pgidVerificationState,
                   workerIdentity: identity,
                 },
               });
@@ -1060,14 +1084,65 @@ export class ChildProcessSupervisor extends EventEmitter {
         continue;
       }
 
+      const pgIdentity = resolveProcessGroupIdentity(workerIdentity, meta);
+
+      const expectedIdentity: ProcessIdentity = {
+        requestId: workerIdentity?.requestId || (meta.requestId as string) || record.id,
+        processInstanceId: workerIdentity?.processInstanceId || (meta.processInstanceId as string) || '',
+        pid: childPid,
+        pgid: pgIdentity.pgid,
+        pgidVerificationState: pgIdentity.pgidVerificationState,
+        hasConflict: pgIdentity.hasConflict,
+        conflictReason: pgIdentity.conflictReason,
+        processStartedAt: workerIdentity?.processStartedAt ?? (meta.processStartedAt as number) ?? record.acquiredAt,
+        lstart: workerIdentity?.lstart,
+        executable: workerIdentity?.executable || (meta.executable as string) || undefined,
+        command: workerIdentity?.command || (meta.command as string) || undefined,
+      };
+
       const isAlive = isProcessAliveSync(childPid);
       if (isAlive === false) {
-        persistence.updateStatus(record.id, 'RELEASED', 'Reclaimed dead orphaned worker');
+        // Explicit Provenance & Verification Guard:
+        // Recovery must retain reservation and coordinator lock whenever PGID verification is unavailable or conflicting.
+        // Never convert missing, invalid, or unverified PGID into a presumed valid or empty process group!
+        if (expectedIdentity.hasConflict || expectedIdentity.pgidVerificationState !== 'OS_VERIFIED' || !expectedIdentity.pgid) {
+          const reason = expectedIdentity.hasConflict
+            ? `Child PID ${childPid} is dead, but process group metadata has conflicting provenance (${expectedIdentity.conflictReason})`
+            : `Child PID ${childPid} is dead, but process group verification is unavailable (PGID: ${expectedIdentity.pgid ?? 'missing'}, state: ${expectedIdentity.pgidVerificationState})`;
+
+          coordinator.markRecoveryRequired(record.id, reason);
+          failedClosedCount++;
+          details.push({
+            reservationId: record.id,
+            status: 'FAIL_CLOSED_UNKNOWN',
+            reason: expectedIdentity.hasConflict
+              ? `Conflicting process group identity metadata (${expectedIdentity.conflictReason})`
+              : `Process group verification unavailable (${expectedIdentity.pgidVerificationState})`,
+          });
+          continue;
+        }
+
+        const groupState = await checkProcessGroupLiveness(expectedIdentity.pgid);
+        if (groupState === 'LIVE_MEMBERS' || groupState === 'UNKNOWN' || groupState === 'ERROR') {
+          coordinator.markRecoveryRequired(
+            record.id,
+            `Child PID ${childPid} is dead, but process group PGID ${expectedIdentity.pgid} state is ${groupState}`
+          );
+          failedClosedCount++;
+          details.push({
+            reservationId: record.id,
+            status: 'FAIL_CLOSED_UNKNOWN',
+            reason: `Dead worker process group has active or uncertain members (${groupState})`,
+          });
+          continue;
+        }
+
+        persistence.updateStatus(record.id, 'RELEASED', 'Reclaimed dead orphaned worker and quiescent process group');
         reconciledCount++;
         details.push({
           reservationId: record.id,
           status: 'RECLAIMED_DEAD',
-          reason: `PID ${childPid} is confirmed dead`,
+          reason: `PID ${childPid} is confirmed dead and verified process group is ${groupState}`,
         });
         continue;
       }
@@ -1075,19 +1150,25 @@ export class ChildProcessSupervisor extends EventEmitter {
       // Process is alive: inspect snapshot for zombie state or identity verification
       const snapshot = await getProcessSnapshot(childPid);
 
-      const expectedIdentity: ProcessIdentity = {
-        requestId: workerIdentity?.requestId || (meta.requestId as string) || record.id,
-        processInstanceId: workerIdentity?.processInstanceId || (meta.processInstanceId as string) || '',
-        pid: childPid,
-        pgid: workerIdentity?.childPgid ?? (meta.childPgid as number) ?? (meta.pgid as number) ?? undefined,
-        processStartedAt: workerIdentity?.processStartedAt ?? (meta.processStartedAt as number) ?? record.acquiredAt,
-        lstart: workerIdentity?.lstart,
-        executable: workerIdentity?.executable || (meta.executable as string) || undefined,
-        command: workerIdentity?.command || (meta.command as string) || undefined,
-      };
-
       // Zombie process check (Finding 5 & Workstream C)
       if (snapshot?.state === 'ZOMBIE') {
+        if (expectedIdentity.hasConflict || expectedIdentity.pgidVerificationState !== 'OS_VERIFIED' || !expectedIdentity.pgid) {
+          const reason = expectedIdentity.hasConflict
+            ? `Worker PID ${childPid} is a zombie, but process group metadata has conflicting provenance (${expectedIdentity.conflictReason})`
+            : `Worker PID ${childPid} is a zombie, but process group verification is unavailable (PGID: ${expectedIdentity.pgid ?? 'missing'}, state: ${expectedIdentity.pgidVerificationState})`;
+
+          coordinator.markRecoveryRequired(record.id, reason);
+          failedClosedCount++;
+          details.push({
+            reservationId: record.id,
+            status: 'FAIL_CLOSED_UNKNOWN',
+            reason: expectedIdentity.hasConflict
+              ? `Conflicting process group identity metadata for zombie (${expectedIdentity.conflictReason})`
+              : `Process group verification unavailable for zombie worker (${expectedIdentity.pgidVerificationState})`,
+          });
+          continue;
+        }
+
         const groupState = await checkProcessGroupLiveness(expectedIdentity.pgid);
         if (groupState === 'LIVE_MEMBERS' || groupState === 'UNKNOWN' || groupState === 'ERROR') {
           coordinator.markRecoveryRequired(
@@ -1108,7 +1189,7 @@ export class ChildProcessSupervisor extends EventEmitter {
         details.push({
           reservationId: record.id,
           status: 'RECLAIMED_DEAD',
-          reason: `PID ${childPid} is a zombie process and process group is ${groupState}`,
+          reason: `PID ${childPid} is a zombie process and verified process group is ${groupState}`,
         });
         continue;
       }

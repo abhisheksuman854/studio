@@ -189,7 +189,7 @@ test('10. Process Identity: verifies process identity matching and sandboxed fal
       processInstanceId: generateProcessInstanceId(process.pid),
       pid: process.pid,
       pgid: snapshot.pgid,
-      processStartedAt: Date.now() - 10000,
+      processStartedAt: snapshot.startTimeMs ?? Date.now(),
       executable: 'node',
     };
     const verification = verifyProcessIdentity(expected, snapshot);
@@ -203,13 +203,32 @@ test('10. Process Identity: verifies process identity matching and sandboxed fal
       requestId: 'req_self',
       processInstanceId: generateProcessInstanceId(process.pid),
       pid: process.pid,
-      processStartedAt: Date.now() - 10000,
+      processStartedAt: Date.now(),
       executable: 'node',
     };
     const verification = verifyProcessIdentity(expected, null);
     assert.equal(verification.status, 'UNKNOWN');
     assert.equal(verification.isAlive, true);
     assert.equal(verification.canSignal, false); // CANNOT SIGNAL ON UNKNOWN
+  }
+});
+
+test('10b. Process Identity: detects recycled PID when start-time delta exceeds tolerance', async () => {
+  const snapshot = await getProcessSnapshot(process.pid);
+  if (snapshot !== null && snapshot.startTimeMs) {
+    const expectedStale: ProcessIdentity = {
+      requestId: 'req_self_stale',
+      processInstanceId: generateProcessInstanceId(process.pid),
+      pid: process.pid,
+      pgid: snapshot.pgid,
+      processStartedAt: snapshot.startTimeMs - 15000, // 15 seconds delta > 5000ms tolerance
+      executable: 'node',
+    };
+    const verification = verifyProcessIdentity(expectedStale, snapshot);
+    assert.equal(verification.status, 'RECYCLED_PID');
+    assert.equal(verification.isAlive, true);
+    assert.equal(verification.canSignal, false);
+    assert.match(verification.reason, /start time delta \(\d+ms\) exceeds tolerance/);
   }
 });
 
@@ -618,10 +637,10 @@ test('32. Coordinator Integration: uncertain termination locks coordinator in RE
   );
 });
 
-test('33. Restart & Orphan Recovery: reclaims dead orphaned worker cleanly', async () => {
+test('33. Restart & Orphan Recovery: reclaims dead orphaned worker cleanly when OS-verified', async () => {
   const { coordinator, persistence } = createInMemoryCoordinator();
 
-  // Create an active reservation for a dead PID
+  // Create an active reservation for a dead PID with verified dead PGID
   persistence.createReservation({
     id: 'resv_orphan_dead',
     resourceType: 'SDXL',
@@ -633,6 +652,26 @@ test('33. Restart & Orphan Recovery: reclaims dead orphaned worker cleanly', asy
     metadata: {
       workerType: 'DUMMY_WORKER',
       executable: 'node',
+      childPid: 99999999,
+      childPgid: 99999999,
+      pgidVerificationState: 'OS_VERIFIED',
+      workerIdentity: {
+        requestId: 'req_orphan_dead',
+        processInstanceId: 'proc_99999999_1',
+        workerType: 'DUMMY_WORKER',
+        parentPid: 1,
+        childPid: 99999999,
+        childPgid: 99999999,
+        pgidVerificationState: 'OS_VERIFIED',
+        processStartedAt: Date.now() - 5000,
+        workerLifecycleState: 'RUNNING',
+        identityVerificationState: 'VERIFIED_MATCH',
+        reservationCreatedAt: Date.now() - 5000,
+        spawnRequestedAt: Date.now() - 5000,
+        spawnConfirmedAt: Date.now() - 5000,
+        identityPersistedAt: Date.now() - 5000,
+        recoveryAttemptedAt: null,
+      },
     },
   });
 
@@ -644,6 +683,38 @@ test('33. Restart & Orphan Recovery: reclaims dead orphaned worker cleanly', asy
   assert.equal(report.reconciledCount, 1);
   assert.equal(report.failedClosedCount, 0);
   assert.equal(report.details[0].status, 'RECLAIMED_DEAD');
+});
+
+test('33b. Restart & Orphan Recovery: fails closed when PGID verification is unavailable', async () => {
+  const { coordinator, persistence } = createInMemoryCoordinator();
+
+  // Create active reservation for dead PID but WITHOUT verified PGID metadata
+  persistence.createReservation({
+    id: 'resv_orphan_unverified_pgid',
+    resourceType: 'SDXL',
+    ownerId: 'user:42',
+    status: 'ACTIVE',
+    pid: 99999998,
+    acquiredAt: Date.now() - 5000,
+    lastHeartbeatAt: Date.now() - 2000,
+    metadata: {
+      workerType: 'DUMMY_WORKER',
+      executable: 'node',
+      childPid: 99999998,
+      // childPgid is missing!
+    },
+  });
+
+  const report = await ChildProcessSupervisor.reconcileOrphanedWorkerReservations(
+    coordinator,
+    persistence
+  );
+
+  assert.equal(report.reconciledCount, 0);
+  assert.equal(report.failedClosedCount, 1);
+  assert.equal(report.details[0].status, 'FAIL_CLOSED_UNKNOWN');
+  assert.match(report.details[0].reason, /verification unavailable/);
+  assert.equal(coordinator.getState(), 'RECOVERY_REQUIRED');
 });
 
 test('34. Restart & Orphan Recovery: fails closed without signaling if PID was recycled', async () => {

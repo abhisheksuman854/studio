@@ -67,6 +67,9 @@ export interface WorkerIdentityMetadata {
   readonly parentPid: number;
   readonly childPid: number | null;
   readonly childPgid: number | null;
+  readonly pgidVerificationState?: 'UNVERIFIED' | 'OS_VERIFIED';
+  readonly hasConflict?: boolean;
+  readonly conflictReason?: string;
   readonly processStartedAt: number | null;
   readonly lstart?: string;
   readonly reservationCreatedAt: number;
