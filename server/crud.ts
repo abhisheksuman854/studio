@@ -13,6 +13,11 @@ export function crud(db: DB, o: Opts) {
   const enc = (d: Record<string, unknown>) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, json.includes(k) ? JSON.stringify(v) : typeof v === 'boolean' ? +v : v]));
   const parse = (req: Request, partial: boolean) => (partial ? o.schema.partial() : o.schema).safeParse(req.body);
   r.get('/', (req, res) => res.json(db.prepare(`SELECT * FROM ${o.table} WHERE ownerId=? ORDER BY id DESC`).all(uid(req)).map((x) => out(x as Record<string, unknown>))));
+  r.get('/:id', (req, res) => {
+    const row = db.prepare(`SELECT * FROM ${o.table} WHERE id=? AND ownerId=?`).get(req.params.id, uid(req));
+    if (!row) return res.status(404).json({ error: 'not found' });
+    res.json(out(row as Record<string, unknown>));
+  });
   r.post('/', (req, res) => {
     const p = parse(req, false);
     if (!p.success) return res.status(400).json({ error: p.error.flatten() });

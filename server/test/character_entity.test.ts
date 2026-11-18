@@ -59,13 +59,14 @@ test('Character Entity Database Persistence & Identity Tokens', async () => {
     appearance: 'Striking classical dancer with deep espresso eyes and sharp defined jawline',
     clothingStyle: 'Copper gold temple silk with traditional ornaments',
     personality: 'Graceful and intense soloist',
+    testMock: true,
   });
 
   assert.ok(char.id);
   assert.equal(char.name, 'Kavya Sen');
   assert.ok(char.referenceImage.length > 0);
   assert.ok(char.identityTokens.length > 0);
-  assert.equal(char.generationModel, 'AURAVO_LOCAL_HIGHRES_ENGINE');
+  assert.ok(char.generationModel.includes('SDXL_LIGHTNING'));
   assert.ok(char.generationParameters.seed > 0);
 
   // Verify DB retrieval
@@ -100,6 +101,7 @@ test('Character Entity API - Generation and Identity Retrieval Endpoints', async
       appearance: 'Fiery dancer with dark curls and fierce brown eyes',
       clothingStyle: 'Crimson silk layered flamenco skirt and bodice',
       personality: 'Passionate and rhythmic',
+      testMock: true,
     });
 
     assert.equal(genRes.status, 201);
@@ -114,7 +116,7 @@ test('Character Entity API - Generation and Identity Retrieval Endpoints', async
     const identRes = await c('GET', `/api/characters/${charId}/identity`);
     assert.equal(identRes.status, 200);
     assert.equal(identRes.body.id, charId);
-    assert.equal(identRes.body.generationModel, 'AURAVO_LOCAL_HIGHRES_ENGINE');
+    assert.ok(identRes.body.generationModel.includes('SDXL_LIGHTNING'));
     assert.ok(identRes.body.identityTokens.length > 0);
 
     // 4. Test archetype adoption persists identity tokens

@@ -3043,12 +3043,48 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
   const [selectedRegionFilter, setSelectedRegionFilter] = useState<string>('ALL');
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [generationProgressText, setGenerationProgressText] = useState<string>('');
   const [customPreviewUrl, setCustomPreviewUrl] = useState<string | null>(null);
+  const [previewDetails, setPreviewDetails] = useState<any | null>(null);
   const [msg, setMsg] = useState('');
-  const [showCustomForm, setShowCustomForm] = useState(false);
+  const [showCustomForm, setShowCustomForm] = useState(true);
   const [fullModalArc, setFullModalArc] = useState<any | null>(null);
+  const [selectedCharacterModal, setSelectedCharacterModal] = useState<any | null>(null);
   const [animatingCharId, setAnimatingCharId] = useState<number | null>(null);
   const [animatedFaceVideo, setAnimatedFaceVideo] = useState<{ name: string; url: string } | null>(null);
+
+  // Natural Language Description & Options
+  const [naturalDescription, setNaturalDescription] = useState<string>(
+    'An original fictional young adult fantasy explorer, distinctive dark wavy hair, warm brown eyes, wearing a practical forest-green travel jacket with brass buttons, neutral studio background, realistic photography'
+  );
+  const [selectedRegion, setSelectedRegion] = useState<string>('South Asian / Indian');
+  const [name, setName] = useState('Priya');
+  const [role, setRole] = useState('Soloist Artiste');
+  const [age, setAge] = useState(23);
+  const [personality, setPersonality] = useState(REGION_PRESETS['South Asian / Indian'].personality);
+  const [appearance, setAppearance] = useState(REGION_PRESETS['South Asian / Indian'].appearance);
+  const [clothingStyle, setClothingStyle] = useState(REGION_PRESETS['South Asian / Indian'].clothingStyle);
+  const [voiceStyle, setVoiceStyle] = useState(REGION_PRESETS['South Asian / Indian'].voiceStyle);
+  const [lightingPreset, setLightingPreset] = useState('Dramatic Theatrical Stage Rim Lighting');
+  const [visualPrompt, setVisualPrompt] = useState(REGION_PRESETS['South Asian / Indian'].visualPrompt);
+  const [negativePrompt, setNegativePrompt] = useState('blurry, distorted, bad anatomy, deformed eyes, extra limbs, low resolution, cartoonish, 3d render, plastic skin');
+  const [seed, setSeed] = useState<number>(42);
+
+  const applyRegionPreset = (r: string) => {
+    setSelectedRegion(r);
+    const p = REGION_PRESETS[r];
+    if (p) {
+      setPersonality(p.personality);
+      setAppearance(p.appearance);
+      setClothingStyle(p.clothingStyle);
+      setVoiceStyle(p.voiceStyle);
+      setVisualPrompt(p.visualPrompt);
+    }
+  };
+
+  const randomizeSeed = () => {
+    setSeed(Math.floor(Math.random() * 900000) + 10000);
+  };
 
   const handleAnimateFace = async (characterId: number, characterName: string) => {
     setAnimatingCharId(characterId);
@@ -3066,28 +3102,6 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
       setMsg(`Error generating face animation: ${err.message}`);
     } finally {
       setAnimatingCharId(null);
-    }
-  };
-
-  // Custom Form
-  const [selectedRegion, setSelectedRegion] = useState<string>('South Asian / Indian');
-  const [name, setName] = useState('Priya');
-  const [age, setAge] = useState(23);
-  const [personality, setPersonality] = useState(REGION_PRESETS['South Asian / Indian'].personality);
-  const [appearance, setAppearance] = useState(REGION_PRESETS['South Asian / Indian'].appearance);
-  const [clothingStyle, setClothingStyle] = useState(REGION_PRESETS['South Asian / Indian'].clothingStyle);
-  const [voiceStyle, setVoiceStyle] = useState(REGION_PRESETS['South Asian / Indian'].voiceStyle);
-  const [visualPrompt, setVisualPrompt] = useState(REGION_PRESETS['South Asian / Indian'].visualPrompt);
-
-  const applyRegionPreset = (r: string) => {
-    setSelectedRegion(r);
-    const p = REGION_PRESETS[r];
-    if (p) {
-      setPersonality(p.personality);
-      setAppearance(p.appearance);
-      setClothingStyle(p.clothingStyle);
-      setVoiceStyle(p.voiceStyle);
-      setVisualPrompt(p.visualPrompt);
     }
   };
 
@@ -3114,9 +3128,9 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
         archetypeId,
       });
       if (res.alreadyAdopted) {
-        setMsg(`Dancer "${res.character.name}" is already in your brand persona roster!`);
+        setMsg(`Character "${res.character.name}" is already in your brand persona roster!`);
       } else {
-        setMsg(`✨ Dancer "${res.character.name}" adopted successfully!`);
+        setMsg(`✨ Character "${res.character.name}" adopted successfully!`);
       }
       loadData();
     } catch (e: any) {
@@ -3129,46 +3143,69 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
   const generatePortraitPreview = async () => {
     if (!appearance.trim() || !clothingStyle.trim()) return;
     setPreviewLoading(true);
+    setGenerationProgressText('⚡ Initializing local ByteDance/SDXL-Lightning model on Apple Silicon MPS...');
     setMsg('');
+
+    const progressTimer = setTimeout(() => {
+      setGenerationProgressText('🧠 Executing 4-step distilled UNet denoising on Metal Performance Shaders (MPS)...');
+    }, 3000);
+
+    const progressTimer2 = setTimeout(() => {
+      setGenerationProgressText('🔬 Decoding latents in FP32 on CPU (bypassing MPS half-precision NaN artifacts)...');
+    }, 10000);
+
     try {
+      const fullPrompt = `${naturalDescription.trim()} ${appearance.trim()}, wearing ${clothingStyle.trim()}. ${lightingPreset}. ${visualPrompt.trim()}`.trim();
       const res = await api('POST', '/characters/preview-portrait', {
-        name: name || 'Virtual Dancer',
+        name: name || 'Fictional Character',
+        role: role || `${selectedRegion} Character`,
+        region: selectedRegion,
         appearance,
         clothingStyle,
-        visualPrompt,
+        visualPrompt: fullPrompt,
+        negativePrompt,
+        seed,
       });
+
       setCustomPreviewUrl(res.portraitUrl);
-      setMsg('✨ Face model portrait generated successfully!');
+      setPreviewDetails(res);
+      setMsg(`✨ Genuine AI Character Portrait generated successfully via ${res.model || 'SDXL-Lightning'} (Seed: ${res.seed})!`);
     } catch (e: any) {
       setMsg(`Error generating preview: ${e.message}`);
     } finally {
+      clearTimeout(progressTimer);
+      clearTimeout(progressTimer2);
       setPreviewLoading(false);
+      setGenerationProgressText('');
     }
   };
 
-  const createCustomDancer = async (e: FormEvent) => {
-    e.preventDefault();
+  const saveCustomCharacter = async (e?: FormEvent) => {
+    if (e) e.preventDefault();
     if (!name.trim()) return;
     setLoading(true);
     setMsg('');
     try {
-      await api('POST', '/characters/generate-entity', {
+      const fullPrompt = `${naturalDescription.trim()} ${appearance.trim()}, wearing ${clothingStyle.trim()}. ${lightingPreset}. ${visualPrompt.trim()}`.trim();
+      const res = await api('POST', '/characters/generate-entity', {
         brandId: selectedBrandId,
         name: name.trim(),
-        role: `${selectedRegion} Soloist`,
+        role: role.trim() || `${selectedRegion} Character`,
         region: selectedRegion,
         age: Number(age),
         personality: personality.trim(),
         appearance: appearance.trim(),
         clothingStyle: clothingStyle.trim(),
         voiceStyle: voiceStyle.trim(),
-        customPrompt: visualPrompt.trim(),
+        customPrompt: fullPrompt,
+        negativePrompt,
+        seed,
+        referenceImage: customPreviewUrl || undefined,
       });
-      setMsg(`✨ Custom AI Character Entity "${name}" generated with locked identity tokens and saved to your brand!`);
-      setShowCustomForm(false);
+      setMsg(`✅ AI Character "${res.character.name}" saved to Character Library with locked identity tokens!`);
       loadData();
     } catch (e: any) {
-      setMsg(`Error: ${e.message}`);
+      setMsg(`Error saving character: ${e.message}`);
     } finally {
       setLoading(false);
     }
@@ -3177,10 +3214,11 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
   const deleteCharacter = async (id: number) => {
     try {
       await api('DELETE', `/characters/${id}`);
-      setMsg('Dancer removed.');
+      setMsg('Character removed from library.');
+      if (selectedCharacterModal?.id === id) setSelectedCharacterModal(null);
       loadData();
     } catch (e: any) {
-      setMsg(`Error: ${e.message}`);
+      setMsg(`Error removing character: ${e.message}`);
     }
   };
 
@@ -3190,135 +3228,338 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
 
   return (
     <div>
-      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
+      {/* Studio Header Card */}
+      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
         <div>
-          <h2>💃 Dancer Personas &amp; Face Models Studio</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>
-            Inspect visual portraits, filter by target geographic region/ethnicity, adopt pre-built luxury dancer archetypes, or design your own persistent virtual face model.
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h2 style={{ margin: 0 }}>🎨 Character Studio &amp; Face Models</h2>
+            <span style={{ fontSize: 11, background: '#064e3b', color: '#6ee7b7', padding: '3px 8px', borderRadius: 12, border: '1px solid #059669', fontWeight: 'bold' }}>
+              $0.00 ZERO-COST LOCAL AI
+            </span>
+          </div>
+          <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: '6px 0 0' }}>
+            Describe an original fictional character in natural language, configure visual traits, generate genuine photorealistic 1024x1024 portraits with local SDXL-Lightning, and save to your persistent Character Library.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 8 }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <div>
-            <label style={{ fontSize: 12 }}>Target Brand</label>
-            <select value={selectedBrandId} onChange={(e) => setSelectedBrandId(Number(e.target.value))} style={{ minWidth: 200 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>Active Brand</label>
+            <select value={selectedBrandId} onChange={(e) => setSelectedBrandId(Number(e.target.value))} style={{ minWidth: 200, display: 'block', marginTop: 4 }}>
               {brands.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
           </div>
-          <div style={{ marginTop: 16 }}>
-            <button className="btn btn-outline" onClick={() => setShowCustomForm(!showCustomForm)}>
-              {showCustomForm ? '✕ Close Custom Creator' : '🎨 Create Custom Face Persona'}
-            </button>
-          </div>
+          <button className="btn btn-outline" style={{ marginTop: 18 }} onClick={() => setShowCustomForm(!showCustomForm)}>
+            {showCustomForm ? '▲ Hide Character Creator' : '➕ Create New Character'}
+          </button>
         </div>
       </div>
 
-      {msg && <div className="card" style={{ background: '#1e293b' }}>{msg}</div>}
+      {msg && (
+        <div className="card" style={{ background: '#1e293b', borderLeft: '4px solid var(--accent)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>{msg}</div>
+          <button style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 16 }} onClick={() => setMsg('')}>✕</button>
+        </div>
+      )}
 
+      {/* Main Creation Workflow */}
       {showCustomForm && (
-        <div className="card" style={{ background: '#172033', border: '1px solid var(--accent)', marginBottom: 24 }}>
-          <h3 style={{ marginTop: 0 }}>🎨 Create Custom Dancer &amp; Face Model</h3>
-          <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: -6 }}>
-            Select your target demographic region to auto-populate cultural traits, then customize the facial features, signature costume, and click "Generate Face Preview".
-          </p>
+        <div className="card" style={{ background: '#0d1322', border: '1px solid #1e293b', marginBottom: 24, boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #1e293b', paddingBottom: 14, marginBottom: 16 }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 18, color: '#f8fafc' }}>🪄 Design Original Fictional Character</h3>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                Step-by-step workflow: Natural language description → Parameter tuning → Real local AI synthesis → Library persistence
+              </div>
+            </div>
+            <div style={{ fontSize: 11, background: '#172554', color: '#93c5fd', padding: '4px 10px', borderRadius: 8, border: '1px solid #1e40af' }}>
+              Engine: ByteDance/SDXL-Lightning (MPS + CPU FP32 VAE)
+            </div>
+          </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: 24, marginTop: 16 }}>
-            <form onSubmit={createCustomDancer} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-              <div style={{ gridColumn: 'span 2' }}>
-                <label>🌍 Target Audience Region &amp; Ethnicity</label>
-                <select value={selectedRegion} onChange={(e) => applyRegionPreset(e.target.value)} style={{ border: '1px solid var(--accent)', fontWeight: 'bold' }}>
-                  <option value="South Asian / Indian">🇮🇳 South Asian / Indian (Desi, Bollywood, Classical Fusion)</option>
-                  <option value="Latina / Hispanic">🇪🇸 Latina / Hispanic (Flamenco, Latin Tango, Ballroom)</option>
-                  <option value="East Asian">🇯🇵 East Asian / Korean (K-Pop Stage, High-Heels Soloist)</option>
-                  <option value="Middle Eastern / Arab">🇦🇪 Middle Eastern / Arab (Oriental Cabaret, Belly-Fusion)</option>
-                  <option value="Western / American">🇺🇸 Western / American (Broadway, Cabaret Noir, High Glamour)</option>
-                  <option value="African / Afro-Diaspora">🇳🇬 African / Afro-Diaspora (Afro-Fusion, Royal Stage)</option>
-                  <option value="European / Modern Stage">🇪🇺 European / Modern Stage (Commercial Stage, Heels)</option>
-                </select>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 0.75fr', gap: 24 }}>
+            {/* Input Form Column */}
+            <form onSubmit={saveCustomCharacter} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Step 1: Natural Language Description */}
+              <div style={{ background: '#131e36', padding: 14, borderRadius: 10, border: '1px solid #1e3a8a' }}>
+                <label style={{ fontWeight: 'bold', color: '#93c5fd', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>✍️ 1. Describe Your Character in Natural Language</span>
+                </label>
+                <textarea
+                  value={naturalDescription}
+                  onChange={(e) => setNaturalDescription(e.target.value)}
+                  placeholder="Describe your original fictional character, appearance, posture, expression, clothing, lighting, and visual mood..."
+                  rows={3}
+                  style={{ width: '100%', marginTop: 8, background: '#0b1120', border: '1px solid #334155', borderRadius: 6, color: '#f8fafc', padding: 10, fontSize: 13, resize: 'vertical' }}
+                  required
+                />
               </div>
-              <div>
-                <label>Dancer Name &amp; Stage Title</label>
-                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Valentina 'The Midnight Flame'" required />
+
+              {/* Step 2: Name, Role, Cultural Demographic & Age */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>Character Name</label>
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="e.g. Nyx Shadowblade, Valentina, Priya"
+                    style={{ width: '100%', marginTop: 4 }}
+                    required
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>Role / Archetype</label>
+                  <input
+                    value={role}
+                    onChange={(e) => setRole(e.target.value)}
+                    placeholder="e.g. Solo Artiste, Space Explorer, Infiltrator"
+                    style={{ width: '100%', marginTop: 4 }}
+                    required
+                  />
+                </div>
               </div>
-              <div>
-                <label>Age &amp; Voice Profile</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input type="number" value={age} onChange={(e) => setAge(Number(e.target.value))} style={{ width: 75 }} required />
-                  <select value={voiceStyle} onChange={(e) => setVoiceStyle(e.target.value)} style={{ flex: 1 }}>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.6fr 1fr', gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>🌍 Cultural / Demographic Region</label>
+                  <select
+                    value={selectedRegion}
+                    onChange={(e) => applyRegionPreset(e.target.value)}
+                    style={{ width: '100%', marginTop: 4, fontWeight: 'bold' }}
+                  >
+                    <option value="South Asian / Indian">🇮🇳 South Asian / Indian</option>
+                    <option value="Latina / Hispanic">🇪🇸 Latina / Hispanic</option>
+                    <option value="East Asian">🇯🇵 East Asian / Korean</option>
+                    <option value="Middle Eastern / Arab">🇦🇪 Middle Eastern / Arab</option>
+                    <option value="Western / American">🇺🇸 Western / American</option>
+                    <option value="African / Afro-Diaspora">🇳🇬 African / Afro-Diaspora</option>
+                    <option value="European / Modern Stage">🇪🇺 European / Modern Stage</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>Age</label>
+                  <input
+                    type="number"
+                    value={age}
+                    onChange={(e) => setAge(Number(e.target.value))}
+                    style={{ width: '100%', marginTop: 4 }}
+                    min={18}
+                    max={90}
+                    required
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>Voice Profile</label>
+                  <select value={voiceStyle} onChange={(e) => setVoiceStyle(e.target.value)} style={{ width: '100%', marginTop: 4 }}>
                     <option value="Samantha">Samantha (Smooth, confident)</option>
-                    <option value="Victoria">Victoria (Warm, velvety, glamorous)</option>
-                    <option value="Karen">Karen (Mesmerizing, mysterious)</option>
+                    <option value="Victoria">Victoria (Warm, velvety)</option>
+                    <option value="Karen">Karen (Mysterious, sharp)</option>
                     <option value="Moira">Moira (Fierce, punchy)</option>
                     <option value="Daniel">Daniel (Deep, commanding)</option>
                   </select>
                 </div>
               </div>
-              <div style={{ gridColumn: 'span 2' }}>
-                <label>Face &amp; Physical Features (Hair, Eyes, Cheekbones, Build)</label>
-                <input value={appearance} onChange={(e) => setAppearance(e.target.value)} placeholder="e.g. High cheekbones, deep hazel eyes, dark wavy hair, athletic dancer posture" required />
-              </div>
-              <div style={{ gridColumn: 'span 2' }}>
-                <label>Signature Stage Attire &amp; Costume Glamour</label>
-                <input value={clothingStyle} onChange={(e) => setClothingStyle(e.target.value)} placeholder="e.g. Crimson liquid silk high-slit gown with gold crystal corset" required />
-              </div>
+
+              {/* Step 3: Facial & Wardrobe Specifics */}
               <div>
-                <label>Personality &amp; Dance Specialty</label>
-                <input value={personality} onChange={(e) => setPersonality(e.target.value)} placeholder="e.g. Sensual, poised, magnetic eye contact, Latin Ballroom & Cabaret" required />
-              </div>
-              <div>
-                <label>Lighting &amp; Visual Aesthetics Prompt</label>
-                <input value={visualPrompt} onChange={(e) => setVisualPrompt(e.target.value)} placeholder="e.g. Chiaroscuro stage spotlight, golden rim lighting, 9:16 vertical 8k" required />
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Face &amp; Physical Features (Hair, Eyes, Cheekbones, Build)</label>
+                <input
+                  value={appearance}
+                  onChange={(e) => setAppearance(e.target.value)}
+                  placeholder="e.g. High sculpted cheekbones, deep espresso almond eyes, sleek dark wavy hair, athletic posture"
+                  style={{ width: '100%', marginTop: 4 }}
+                  required
+                />
               </div>
 
-              <div style={{ gridColumn: 'span 2', display: 'flex', gap: 12, marginTop: 8 }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Costume &amp; Signature Attire</label>
+                <input
+                  value={clothingStyle}
+                  onChange={(e) => setClothingStyle(e.target.value)}
+                  placeholder="e.g. Royal peacock-blue silk and gold embroidered stage corset with matching lehenga skirt"
+                  style={{ width: '100%', marginTop: 4 }}
+                  required
+                />
+              </div>
+
+              {/* Step 4: Lighting Aesthetic & Seed */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 0.7fr', gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>Lighting &amp; Visual Style Preset</label>
+                  <select
+                    value={lightingPreset}
+                    onChange={(e) => setLightingPreset(e.target.value)}
+                    style={{ width: '100%', marginTop: 4 }}
+                  >
+                    <option value="Dramatic Theatrical Stage Rim Lighting">Dramatic Theatrical Stage Rim Lighting</option>
+                    <option value="High-Fashion Editorial Studio 8k">High-Fashion Editorial Studio (Clean Neutral)</option>
+                    <option value="Chiaroscuro Cinematic Shadows & Golden Flare">Chiaroscuro Cinematic Shadows &amp; Golden Flare</option>
+                    <option value="Cyberpunk Neon Teal and Violet Reflections">Cyberpunk Neon Teal &amp; Violet Reflections</option>
+                    <option value="Natural Warm Golden Hour Sunlight">Natural Warm Golden Hour Sunlight</option>
+                    <option value="Ethereal Fantasy Royal Palace Glow">Ethereal Fantasy Royal Palace Glow</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 'bold' }}>Inference Seed</label>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                    <input
+                      type="number"
+                      value={seed}
+                      onChange={(e) => setSeed(Number(e.target.value))}
+                      style={{ flex: 1 }}
+                    />
+                    <button type="button" className="btn btn-outline" style={{ padding: '4px 10px', fontSize: 12 }} onClick={randomizeSeed} title="Generate random seed">
+                      🎲
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>Negative Prompt (Filter Artifacts)</label>
+                <input
+                  value={negativePrompt}
+                  onChange={(e) => setNegativePrompt(e.target.value)}
+                  style={{ width: '100%', marginTop: 4, fontSize: 12, color: '#94a3b8' }}
+                />
+              </div>
+
+              {/* Buttons */}
+              <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
                 <button
                   type="button"
                   className="btn btn-outline"
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, borderColor: '#38bdf8', color: '#38bdf8', fontWeight: 'bold' }}
                   onClick={generatePortraitPreview}
-                  disabled={previewLoading}
+                  disabled={previewLoading || loading}
                 >
-                  {previewLoading ? '🎨 Rendering Face Preview...' : '🪄 Generate Live Face Preview'}
+                  {previewLoading ? '⏳ Synthesizing AI Portrait...' : '🪄 Generate Character Preview'}
                 </button>
                 <button
                   type="submit"
                   className="btn btn-gold"
-                  style={{ flex: 1 }}
-                  disabled={loading}
+                  style={{ flex: 1, padding: '12px 16px', fontWeight: 'bold' }}
+                  disabled={loading || previewLoading}
                 >
-                  {loading ? 'Saving Dancer Persona...' : '🚀 Save Custom Dancer'}
+                  {loading ? 'Saving Character...' : '💾 Save Character to Library'}
                 </button>
               </div>
             </form>
 
-            {/* Live Portrait Preview Card */}
-            <div style={{ background: '#0a0f1d', borderRadius: 12, padding: 16, border: '1px solid var(--card-border)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-              <div style={{ fontSize: 12, fontWeight: 'bold', color: 'var(--text-muted)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 1 }}>
-                Live Face Model Preview
-              </div>
-              {customPreviewUrl ? (
-                <div style={{ width: 220, height: 220, borderRadius: 16, overflow: 'hidden', border: '3px solid var(--accent)', boxShadow: '0 10px 30px rgba(0,0,0,0.7)', position: 'relative' }}>
-                  <img src={customPreviewUrl} alt="Custom Dancer Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            {/* Preview Column & Real-Time Progress */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: 12, padding: 18, textAlign: 'center', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <span style={{ fontSize: 12, fontWeight: 'bold', color: '#94a3b8', letterSpacing: 1 }}>
+                    AI CHARACTER PORTRAIT PREVIEW
+                  </span>
+                  {customPreviewUrl && (
+                    <span style={{ fontSize: 10, background: '#047857', color: '#ecfdf5', padding: '2px 6px', borderRadius: 4, fontWeight: 'bold' }}>
+                      1024 × 1024 PNG
+                    </span>
+                  )}
                 </div>
-              ) : (
-                <div style={{ width: 220, height: 220, borderRadius: 16, border: '2px dashed #334155', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', padding: 16 }}>
-                  <div style={{ fontSize: 36, marginBottom: 8 }}>🎭</div>
-                  <div style={{ fontSize: 13 }}>No Preview Yet</div>
-                  <div style={{ fontSize: 11, marginTop: 4 }}>Click "Generate Live Face Preview" to visualize this face model.</div>
-                </div>
-              )}
-              {customPreviewUrl && (
-                <button
-                  type="button"
-                  className="btn btn-outline"
-                  style={{ marginTop: 10, fontSize: 11, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6, width: '100%', justifyContent: 'center', borderColor: 'var(--accent)', color: '#a5b4fc' }}
-                  onClick={() => triggerDownload(customPreviewUrl, `${(name || 'Custom_Dancer').replace(/[^a-zA-Z0-9]/g, '_')}_Face_Model.png`)}
-                >
-                  📥 Download AI Face Model (.PNG)
-                </button>
-              )}
-              <div style={{ marginTop: 14, fontSize: 13 }}>
-                <b style={{ color: '#f8fafc' }}>{name || 'Custom Dancer'}</b> ({age} yrs)
-                <div style={{ color: 'var(--accent)', fontSize: 11, marginTop: 2 }}>{selectedRegion}</div>
+
+                {previewLoading ? (
+                  <div style={{ minHeight: 320, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, background: '#050811', borderRadius: 12, border: '1px dashed #38bdf8' }}>
+                    <div style={{ fontSize: 44, marginBottom: 16 }}>⚡</div>
+                    <div style={{ fontWeight: 'bold', color: '#38bdf8', fontSize: 14 }}>
+                      Executing Local SDXL AI Generation
+                    </div>
+                    <div style={{ color: '#cbd5e1', fontSize: 12, marginTop: 10, maxWidth: 280, textAlign: 'center', lineHeight: 1.4 }}>
+                      {generationProgressText}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 16 }}>
+                      Zero monetary cost ($0.00) · Running on Apple M3 Pro
+                    </div>
+                  </div>
+                ) : customPreviewUrl ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <div
+                      style={{ width: '100%', maxWidth: 320, aspectRatio: '1/1', borderRadius: 12, overflow: 'hidden', border: '2px solid #38bdf8', boxShadow: '0 15px 30px rgba(0,0,0,0.8)', cursor: 'zoom-in', position: 'relative' }}
+                      onClick={() => setSelectedCharacterModal({
+                        name: name || 'Preview Character',
+                        role: role || `${selectedRegion} Character`,
+                        region: selectedRegion,
+                        age,
+                        appearance,
+                        clothingStyle,
+                        personality,
+                        referenceImage: customPreviewUrl,
+                        generationModel: previewDetails?.model || 'SDXL_LIGHTNING_LOCAL_MPS_CPU_VAE',
+                        generationParameters: { seed, dimensions: '1024x1024', steps: 4 },
+                        identityTokens: previewDetails?.identityTokens || [],
+                        visualPrompt,
+                        negativePrompt,
+                      })}
+                      title="Click to view full uncropped inspection modal"
+                    >
+                      <img
+                        src={customPreviewUrl}
+                        alt="Custom Generated Character"
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
+                      <div style={{ position: 'absolute', bottom: 8, right: 8, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)', padding: '3px 8px', borderRadius: 4, fontSize: 10, color: '#38bdf8', fontWeight: 'bold' }}>
+                        🔍 Click to Inspect
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 14, width: '100%', textAlign: 'left', background: '#0b1120', padding: 12, borderRadius: 8, border: '1px solid #1e293b' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <b style={{ color: '#f8fafc', fontSize: 14 }}>{name || 'Character'}</b>
+                        <span style={{ color: 'var(--accent)', fontSize: 12 }}>Seed: {seed}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{role} · {selectedRegion}</div>
+
+                      {previewDetails?.identityTokens && previewDetails.identityTokens.length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                          <div style={{ fontSize: 10, color: '#64748b', fontWeight: 'bold', marginBottom: 4 }}>LOCKED IDENTITY TOKENS:</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {previewDetails.identityTokens.map((tok: string, idx: number) => (
+                              <span key={idx} style={{ fontSize: 10, background: '#172554', color: '#93c5fd', padding: '1px 6px', borderRadius: 4, border: '1px solid #1e40af' }}>
+                                🔒 {tok}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {previewDetails?.timings && (
+                        <div style={{ marginTop: 8, fontSize: 10, color: '#64748b' }}>
+                          Denoise: {previewDetails.timings.denoise_seconds}s | VAE: {previewDetails.timings.vae_seconds}s | Total: {previewDetails.timings.total_seconds}s
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 8, width: '100%', marginTop: 12 }}>
+                      <button
+                        type="button"
+                        className="btn btn-gold"
+                        style={{ flex: 1, fontSize: 12, padding: '8px 10px' }}
+                        onClick={() => saveCustomCharacter()}
+                        disabled={loading}
+                      >
+                        💾 Save to Library
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-outline"
+                        style={{ fontSize: 12, padding: '8px 12px' }}
+                        onClick={() => triggerDownload(customPreviewUrl, `${(name || 'Character').replace(/[^a-zA-Z0-9]/g, '_')}_Portrait.png`)}
+                      >
+                        📥 Download
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ minHeight: 320, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', border: '2px dashed #1e293b', borderRadius: 12, padding: 24 }}>
+                    <div style={{ fontSize: 44, marginBottom: 12 }}>🎭</div>
+                    <div style={{ fontSize: 14, fontWeight: 'bold', color: '#cbd5e1' }}>Ready to Generate</div>
+                    <div style={{ fontSize: 12, marginTop: 6, maxWidth: 260, lineHeight: 1.4 }}>
+                      Describe your original character on the left and click "Generate Character Preview" to execute genuine local SDXL generation.
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -3454,16 +3695,27 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
         </div>
       </div>
 
-      {/* Active Brand Dancers List */}
-      <div>
-        <h3>💃 Active Dancers in Brand Roster ({characters.length})</h3>
+      {/* Saved Character Library Section */}
+      <div style={{ marginBottom: 36 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 20 }}>📚 Character Library &amp; Brand Roster ({characters.length})</h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: '4px 0 0' }}>
+              Saved character entities with locked identity tokens, persistent visual prompts, and model metadata. Click any character to reopen full details.
+            </p>
+          </div>
+        </div>
+
         {characters.length === 0 ? (
-          <div className="card" style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
-            <div>No active dancers found for this brand.</div>
-            <div style={{ fontSize: 13, marginTop: 4 }}>Click "⚡ Adopt This Dancer" above or create a custom face persona.</div>
+          <div className="card" style={{ textAlign: 'center', padding: 36, color: 'var(--text-muted)', background: '#0a0f1d' }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>👥</div>
+            <div style={{ fontSize: 15, fontWeight: 'bold', color: '#cbd5e1' }}>No Characters Saved in Brand Roster</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>
+              Use the Character Creator above to generate and save your first persistent AI character, or adopt one from the curated archetypes below.
+            </div>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 18 }}>
             {characters.map((c) => {
               const arc = archetypes.find((a: any) => a.name.toLowerCase() === c.name.toLowerCase());
               const portrait = c.referenceImage || arc?.portraitUrl || '/api/media/images/priya_portrait.jpg';
@@ -3473,62 +3725,88 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
               } catch (_) {}
 
               return (
-                <div key={c.id} className="card" style={{ background: '#131c31', border: '1px solid var(--card-border)', display: 'flex', gap: 14 }}>
-                  <img
-                    src={portrait}
-                    alt={c.name}
-                    style={{ width: 88, height: 124, objectFit: 'cover', objectPosition: 'top center', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', flexShrink: 0 }}
-                  />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <h4 style={{ margin: 0, fontSize: 16 }}>{c.name}</h4>
-                          {c.generationModel && (
-                            <span style={{ fontSize: 9, background: '#1e293b', color: '#38bdf8', padding: '1px 5px', borderRadius: 4, border: '1px solid #0284c7' }}>
-                              {c.generationModel}
-                            </span>
-                          )}
+                <div
+                  key={c.id}
+                  className="card"
+                  style={{
+                    background: '#0d1322',
+                    border: '1px solid #1e293b',
+                    borderRadius: 12,
+                    display: 'flex',
+                    gap: 14,
+                    padding: 14,
+                    boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.4)',
+                    transition: 'border-color 0.2s ease',
+                  }}
+                >
+                  <div
+                    style={{ width: 100, height: 130, borderRadius: 8, overflow: 'hidden', cursor: 'zoom-in', flexShrink: 0, border: '1px solid rgba(255,255,255,0.1)', position: 'relative' }}
+                    onClick={() => setSelectedCharacterModal(c)}
+                    title="Click to inspect character details"
+                  >
+                    <img
+                      src={portrait}
+                      alt={c.name}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'top center' }}
+                    />
+                    <div style={{ position: 'absolute', bottom: 4, right: 4, background: 'rgba(0,0,0,0.8)', padding: '1px 4px', borderRadius: 3, fontSize: 9, color: '#38bdf8' }}>
+                      🔍 View
+                    </div>
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div>
+                          <h4 style={{ margin: 0, fontSize: 16, color: '#f8fafc' }}>{c.name}</h4>
+                          <div style={{ color: 'var(--accent)', fontSize: 11, marginTop: 2 }}>{c.description || 'AI Character'}</div>
                         </div>
-                        <div style={{ color: 'var(--accent)', fontSize: 12, marginTop: 2 }}>{c.description || 'Virtual Dancer'}</div>
+                        <button
+                          className="btn btn-danger"
+                          style={{ fontSize: 10, padding: '2px 6px' }}
+                          onClick={() => deleteCharacter(c.id)}
+                          title="Remove character"
+                        >
+                          ✕
+                        </button>
                       </div>
-                      <button className="btn btn-danger" style={{ fontSize: 11, padding: '3px 7px' }} onClick={() => deleteCharacter(c.id)}>
-                        Remove
-                      </button>
-                    </div>
 
-                    <div style={{ marginTop: 8, fontSize: 11, display: 'grid', gap: 3, color: '#cbd5e1' }}>
-                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><b>Look:</b> {c.appearance}</div>
-                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><b>Costume:</b> {c.clothingStyle}</div>
-                    </div>
-
-                    {tokens.length > 0 && (
-                      <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                        {tokens.slice(0, 4).map((t, idx) => (
-                          <span key={idx} style={{ fontSize: 10, background: '#0f172a', color: '#93c5fd', padding: '1px 5px', borderRadius: 4, border: '1px solid rgba(59,130,246,0.3)' }}>
-                            🔒 {t}
+                      {c.generationModel && (
+                        <div style={{ marginTop: 6 }}>
+                          <span style={{ fontSize: 9, background: '#1e293b', color: '#38bdf8', padding: '2px 5px', borderRadius: 4, border: '1px solid #0284c7' }}>
+                            {c.generationModel}
                           </span>
-                        ))}
-                      </div>
-                    )}
+                        </div>
+                      )}
 
-                    <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                      {tokens.length > 0 && (
+                        <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {tokens.slice(0, 3).map((t, idx) => (
+                            <span key={idx} style={{ fontSize: 9, background: '#0f172a', color: '#93c5fd', padding: '1px 5px', borderRadius: 4, border: '1px solid rgba(59,130,246,0.3)' }}>
+                              🔒 {t}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 6, marginTop: 10, justifyContent: 'flex-end' }}>
                       <button
                         type="button"
                         className="btn btn-outline"
-                        style={{ fontSize: 11, padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 4, background: '#131e36', color: '#93c5fd', borderColor: '#3b82f688' }}
-                        onClick={() => triggerDownload(portrait, `${c.name.replace(/[^a-zA-Z0-9]/g, '_')}_Face_Model.jpg`)}
+                        style={{ fontSize: 11, padding: '3px 8px', color: '#38bdf8', borderColor: '#38bdf8' }}
+                        onClick={() => setSelectedCharacterModal(c)}
                       >
-                        📥 Download Portrait
+                        🔍 Reopen Dossier
                       </button>
                       <button
                         type="button"
                         className="btn btn-gold"
-                        style={{ fontSize: 11, padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 4 }}
+                        style={{ fontSize: 11, padding: '3px 8px' }}
                         onClick={() => handleAnimateFace(c.id, c.name)}
                         disabled={animatingCharId === c.id}
                       >
-                        {animatingCharId === c.id ? '⏳ Animating...' : '✨ Animate Face'}
+                        {animatingCharId === c.id ? '⏳ Animate...' : '✨ Animate Face'}
                       </button>
                     </div>
                   </div>
@@ -3538,6 +3816,130 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
           </div>
         )}
       </div>
+
+      {/* Selected Character Reopen & Inspection Modal */}
+      {selectedCharacterModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.88)',
+            backdropFilter: 'blur(10px)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+          }}
+          onClick={() => setSelectedCharacterModal(null)}
+        >
+          <div
+            style={{
+              background: '#0d1322',
+              border: '2px solid #38bdf8',
+              borderRadius: 16,
+              maxWidth: 960,
+              maxHeight: '92vh',
+              width: '100%',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'row',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.85)',
+              position: 'relative',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Left: Full Uncropped Portrait Image */}
+            <div style={{ flex: '1 1 50%', background: '#020617', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', maxHeight: '92vh' }}>
+              <img
+                src={selectedCharacterModal.referenceImage || '/api/media/images/priya_portrait.jpg'}
+                alt={selectedCharacterModal.name}
+                style={{ width: '100%', height: '100%', maxHeight: '92vh', objectFit: 'contain' }}
+              />
+            </div>
+
+            {/* Right: Full Dossier & Inspector Panel */}
+            <div style={{ flex: '1 1 50%', padding: 24, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', overflowY: 'auto', maxHeight: '92vh' }}>
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <div>
+                    <span style={{ fontSize: 11, background: '#0284c7', color: '#f0f9ff', padding: '2px 8px', borderRadius: 4, fontWeight: 'bold' }}>
+                      {selectedCharacterModal.generationModel || 'SDXL_LIGHTNING_LOCAL_MPS_CPU_VAE'}
+                    </span>
+                    <h2 style={{ margin: '8px 0 2px 0', fontSize: 24, color: '#f8fafc' }}>{selectedCharacterModal.name}</h2>
+                    <div style={{ color: 'var(--accent)', fontSize: 14 }}>{selectedCharacterModal.description || 'Fictional Character Entity'}</div>
+                  </div>
+                  <button
+                    className="btn btn-outline"
+                    style={{ padding: '4px 10px', fontSize: 16, borderColor: '#475569', color: '#f8fafc' }}
+                    onClick={() => setSelectedCharacterModal(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Locked Identity Tokens */}
+                {selectedCharacterModal.identityTokens && (
+                  <div style={{ marginTop: 16, background: '#131e36', padding: 12, borderRadius: 8, border: '1px solid #1e40af' }}>
+                    <div style={{ fontSize: 11, fontWeight: 'bold', color: '#93c5fd', marginBottom: 6 }}>
+                      🔒 LOCKED IDENTITY TOKENS (ANCHORED FOR ALL SCENES):
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {(typeof selectedCharacterModal.identityTokens === 'string'
+                        ? JSON.parse(selectedCharacterModal.identityTokens || '[]')
+                        : selectedCharacterModal.identityTokens
+                      ).map((tok: string, idx: number) => (
+                        <span key={idx} style={{ fontSize: 11, background: '#172554', color: '#bfdbfe', padding: '2px 8px', borderRadius: 4, border: '1px solid #3b82f6' }}>
+                          🔒 {tok}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ marginTop: 16, display: 'grid', gap: 10, fontSize: 12 }}>
+                  <div><b style={{ color: '#94a3b8' }}>Age:</b> <span style={{ color: '#f8fafc' }}>{selectedCharacterModal.age} Years</span></div>
+                  <div>
+                    <b style={{ color: '#94a3b8' }}>Physical Appearance:</b>
+                    <div style={{ color: '#e2e8f0', marginTop: 2, lineHeight: 1.4 }}>{selectedCharacterModal.appearance}</div>
+                  </div>
+                  <div>
+                    <b style={{ color: '#94a3b8' }}>Signature Costume:</b>
+                    <div style={{ color: '#e2e8f0', marginTop: 2, lineHeight: 1.4 }}>{selectedCharacterModal.clothingStyle}</div>
+                  </div>
+                  <div>
+                    <b style={{ color: '#94a3b8' }}>Personality &amp; Mannerisms:</b>
+                    <div style={{ color: '#e2e8f0', marginTop: 2, lineHeight: 1.4 }}>{selectedCharacterModal.personality}</div>
+                  </div>
+                  <div>
+                    <b style={{ color: '#94a3b8' }}>Visual Generation Prompt:</b>
+                    <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 2, fontStyle: 'italic', lineHeight: 1.4 }}>{selectedCharacterModal.visualPrompt}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 20, display: 'flex', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn btn-gold"
+                  style={{ flex: 1, padding: '10px 14px', fontSize: 12, fontWeight: 'bold' }}
+                  onClick={() => triggerDownload(selectedCharacterModal.referenceImage, `${selectedCharacterModal.name.replace(/[^a-zA-Z0-9]/g, '_')}_Portrait.png`)}
+                >
+                  📥 Download PNG
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  style={{ padding: '10px 14px', fontSize: 12 }}
+                  onClick={() => setSelectedCharacterModal(null)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* LivePortrait Animated Face Modal */}
       {animatedFaceVideo && (

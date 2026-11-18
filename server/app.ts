@@ -65,7 +65,24 @@ export function createApp(db: DB, opts: { secureCookie?: boolean; modelsDir?: st
   }));
   api.use('/characters', crud(db, {
     table: 'characters',
-    schema: z.object({ brandId: z.number().int(), name: z.string().min(1).max(100), description: str, age: num, personality: str, appearance: str, clothingStyle: str, visualPrompt: str, negativePrompt: str, voiceStyle: str }),
+    json: ['generationParameters', 'identityTokens', 'metadata'],
+    schema: z.object({
+      brandId: z.number().int(),
+      name: z.string().min(1).max(100),
+      description: str,
+      age: num,
+      personality: str,
+      appearance: str,
+      clothingStyle: str,
+      visualPrompt: str,
+      negativePrompt: str,
+      voiceStyle: str,
+      referenceImage: str,
+      generationModel: str,
+      generationParameters: z.any().optional(),
+      identityTokens: z.any().optional(),
+      metadata: z.any().optional(),
+    }),
     check: (d, u, x) => x.brandId != null && !d.prepare('SELECT 1 FROM brands WHERE id=? AND ownerId=?').get(x.brandId, u) ? 'brand not found' : null,
   }));
   api.use('/content', crud(db, {

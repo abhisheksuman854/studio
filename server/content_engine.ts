@@ -333,6 +333,10 @@ export function createContentEngineRouter(db: DB, providers?: { llm?: LLMProvide
         personality: z.string().optional(),
         voiceStyle: z.string().optional(),
         customPrompt: z.string().optional(),
+        negativePrompt: z.string().optional(),
+        seed: z.number().int().optional(),
+        referenceImage: z.string().optional(),
+        testMock: z.boolean().optional(),
       });
       const p = schema.safeParse(req.body);
       if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
@@ -353,6 +357,10 @@ export function createContentEngineRouter(db: DB, providers?: { llm?: LLMProvide
         personality: p.data.personality,
         voiceStyle: p.data.voiceStyle,
         customPrompt: p.data.customPrompt,
+        negativePrompt: p.data.negativePrompt,
+        seed: p.data.seed,
+        referenceImage: p.data.referenceImage,
+        testMock: p.data.testMock,
       });
 
       res.status(201).json({ ok: true, character: entity });
@@ -428,34 +436,43 @@ export function createContentEngineRouter(db: DB, providers?: { llm?: LLMProvide
   router.post('/characters/preview-portrait', async (req: Request, res: Response) => {
     try {
       const schema = z.object({
-        name: z.string().default('Virtual Dancer'),
+        name: z.string().default('Virtual Character'),
+        role: z.string().optional(),
+        region: z.string().optional(),
         appearance: z.string(),
         clothingStyle: z.string(),
         visualPrompt: z.string().optional(),
+        negativePrompt: z.string().optional(),
+        seed: z.number().int().optional(),
+        testMock: z.boolean().optional(),
       });
       const p = schema.safeParse(req.body);
       if (!p.success) return res.status(400).json({ error: p.error.errors[0].message });
 
-      const imgDir = path.resolve('./data/storage/images');
-      fs.mkdirSync(imgDir, { recursive: true });
-
-      const filename = `custom_portrait_${Date.now()}.png`;
-      const targetFile = path.join(imgDir, filename);
-
-      const prompt = `Close-up face portrait of ${p.data.name}, ${p.data.appearance}, wearing ${p.data.clothingStyle}. ${p.data.visualPrompt || 'Dramatic stage lighting, golden rim accents, highly detailed, 8k vertical composition'}`;
-      
-      const { filePath } = await imageProvider.generateSceneImage(
-        prompt,
-        'Dramatic stage lighting, high-contrast, cinematic glamour',
-        targetFile,
-        `PORTRAIT: ${p.data.name.toUpperCase()}`,
-        p.data.appearance
-      );
+      const preview = await characterGen.generatePortraitPreview({
+        name: p.data.name,
+        role: p.data.role,
+        region: p.data.region,
+        appearance: p.data.appearance,
+        clothingStyle: p.data.clothingStyle,
+        visualPrompt: p.data.visualPrompt,
+        negativePrompt: p.data.negativePrompt,
+        seed: p.data.seed,
+        testMock: p.data.testMock,
+      });
 
       res.json({
         ok: true,
-        portraitUrl: `/api/media/images/${filename}`,
-        prompt,
+        portraitUrl: preview.previewImageUrl,
+        prompt: preview.prompt,
+        negativePrompt: preview.negativePrompt,
+        seed: preview.seed,
+        identityTokens: preview.identityTokens,
+        model: preview.model,
+        fileSize: preview.fileSize,
+        dimensions: preview.dimensions,
+        pixelStats: preview.pixelStats,
+        timings: preview.timings,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to generate portrait preview' });
