@@ -12,6 +12,7 @@ import {
   type ReservationStatus,
   type ResourceType,
 } from './types.js';
+import { sanitizeDiagnostic } from './worker_protocol.js';
 
 export interface IPersistenceAdapter {
   createReservation(record: ReservationRecord): void;
@@ -24,6 +25,16 @@ export interface IPersistenceAdapter {
   updateHeartbeat(id: string, timestamp: number): void;
   getReservation(id: string): ReservationRecord | null;
   getActiveOrUnresolved(): ReservationRecord[];
+  updateReservation(
+    id: string,
+    update: {
+      status?: ReservationStatus;
+      pid?: number | null;
+      failureReason?: string;
+      releasedAt?: number;
+      metadata?: Record<string, unknown>;
+    }
+  ): void;
 }
 
 export class SQLitePersistenceAdapter implements IPersistenceAdapter {
@@ -46,7 +57,7 @@ export class SQLitePersistenceAdapter implements IPersistenceAdapter {
           record.acquiredAt,
           record.lastHeartbeatAt,
           record.releasedAt ?? null,
-          record.failureReason ?? null,
+          record.failureReason ? sanitizeDiagnostic(record.failureReason) : null,
           record.metadata ? JSON.stringify(record.metadata) : '{}'
         );
     } catch (err: any) {
@@ -64,13 +75,14 @@ export class SQLitePersistenceAdapter implements IPersistenceAdapter {
     releasedAt?: number
   ): void {
     try {
+      const sanitizedReason = failureReason ? sanitizeDiagnostic(failureReason) : null;
       this.db
         .prepare(
           `UPDATE resource_reservations
            SET status = ?, failureReason = ?, releasedAt = ?, updatedAt = CURRENT_TIMESTAMP
            WHERE id = ?`
         )
-        .run(status, failureReason ?? null, releasedAt ?? null, id);
+        .run(status, sanitizedReason, releasedAt ?? null, id);
     } catch (err: any) {
       throw new ResourceCoordinatorError(
         'PERSISTENCE_ERROR',
@@ -92,6 +104,53 @@ export class SQLitePersistenceAdapter implements IPersistenceAdapter {
       throw new ResourceCoordinatorError(
         'PERSISTENCE_ERROR',
         `Failed to update heartbeat: ${err?.message || err}`
+      );
+    }
+  }
+
+  public updateReservation(
+    id: string,
+    update: {
+      status?: ReservationStatus;
+      pid?: number | null;
+      failureReason?: string;
+      releasedAt?: number;
+      metadata?: Record<string, unknown>;
+    }
+  ): void {
+    try {
+      const sets: string[] = ['updatedAt = CURRENT_TIMESTAMP'];
+      const params: any[] = [];
+
+      if (update.status !== undefined) {
+        sets.push('status = ?');
+        params.push(update.status);
+      }
+      if (update.pid !== undefined) {
+        sets.push('pid = ?');
+        params.push(update.pid);
+      }
+      if (update.failureReason !== undefined) {
+        sets.push('failureReason = ?');
+        params.push(update.failureReason ? sanitizeDiagnostic(update.failureReason) : null);
+      }
+      if (update.releasedAt !== undefined) {
+        sets.push('releasedAt = ?');
+        params.push(update.releasedAt);
+      }
+      if (update.metadata !== undefined) {
+        sets.push('metadata = ?');
+        params.push(JSON.stringify(update.metadata));
+      }
+
+      params.push(id);
+      this.db
+        .prepare(`UPDATE resource_reservations SET ${sets.join(', ')} WHERE id = ?`)
+        .run(...params);
+    } catch (err: any) {
+      throw new ResourceCoordinatorError(
+        'PERSISTENCE_ERROR',
+        `Failed to update reservation: ${err?.message || err}`
       );
     }
   }

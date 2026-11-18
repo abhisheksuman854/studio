@@ -815,8 +815,39 @@ export class ResourceCoordinator {
     const lifecycleTrail: string[] = ['RECOVERY_INSPECTING'];
     this.coordinatorState = 'RECOVERY_INSPECTING';
 
-    // 1. Process liveness & instance identity check (Workstream C / AUDIT-2323-03 / Workstream D)
-    if (record.pid) {
+    // 1. Process liveness & instance identity check (Workstream C / AUDIT-2323-03 / Workstream D / Phase 2.3.3.1.2)
+    const isWorkerReservation = Boolean(
+      record.metadata?.workerType || record.metadata?.workerIdentity
+    );
+
+    if (isWorkerReservation) {
+      const workerIdentity = record.metadata?.workerIdentity as Record<string, unknown> | undefined;
+      const childPid = (workerIdentity?.childPid as number | undefined) ?? record.pid;
+      const lifecycleState = workerIdentity?.workerLifecycleState as string | undefined;
+
+      // Crash during SPAWN_PENDING / SPAWNING without confirmed child PID fails closed
+      if (lifecycleState === 'SPAWN_PENDING' || lifecycleState === 'SPAWNING' || !childPid) {
+        this.coordinatorState = 'RECOVERY_REQUIRED';
+        record.status = 'RECOVERY_REQUIRED';
+        this.persistence?.updateStatus(targetId, 'RECOVERY_REQUIRED', 'Unverified spawn pending process state');
+        return { recovered: false, reason: 'UNVERIFIED_PROCESS_STATE', targetId, lifecycleTrail };
+      }
+
+      const isAlive = this.processLiveness.isProcessAlive(childPid);
+      if (isAlive === 'UNKNOWN') {
+        this.coordinatorState = 'RECOVERY_REQUIRED';
+        record.status = 'RECOVERY_REQUIRED';
+        this.persistence?.updateStatus(targetId, 'RECOVERY_REQUIRED', 'Unverified process state');
+        return { recovered: false, reason: 'UNVERIFIED_PROCESS_STATE', targetId, lifecycleTrail };
+      }
+      if (isAlive === true) {
+        // FAIL CLOSED: Child worker process is still actively running!
+        this.coordinatorState = 'RECOVERY_REQUIRED';
+        record.status = 'RECOVERY_REQUIRED';
+        this.persistence?.updateStatus(targetId, 'RECOVERY_REQUIRED', 'Worker process still alive');
+        return { recovered: false, reason: 'PROCESS_STILL_ALIVE', targetId, lifecycleTrail };
+      }
+    } else if (record.pid) {
       const isCurrentProcess =
         record.pid === process.pid &&
         record.metadata?.processInstanceId === this.processInstanceId;

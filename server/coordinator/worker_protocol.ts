@@ -41,6 +41,7 @@ export const startMessageSchema = z.object({
   type: z.literal('START'),
   version: z.string().min(1),
   requestId: z.string().min(1),
+  processInstanceId: z.string().optional(),
   workerType: z.string().min(1),
   pid: z.number().int().positive(),
   timestamp: z.number().int().positive(),
@@ -212,23 +213,62 @@ export function serializeWorkerMessage(msg: WorkerMessage): string {
 /**
  * Diagnostic Sanitization and Sensitive Data Redaction
  * Prevents disclosure of host paths, passwords, API tokens, bearer headers,
- * and environment variable patterns in logs and error reports.
+ * URL basic authentication, PEM private key blocks, and environment variable patterns
+ * in logs and error reports.
  */
-export function sanitizeDiagnostic(text: string, maxLength = 1000): string {
+export function sanitizeDiagnostic(text: string, maxLength = 2000): string {
   if (!text) return '';
-  let sanitized = text;
+  // Pre-bound input to avoid catastrophic ReDoS on unbounded inputs while preserving context
+  const preBound = Math.max(maxLength * 2, 4096);
+  let sanitized = text.length > preBound ? text.slice(0, preBound) : text;
 
-  // Redact bearer tokens and auth headers
-  sanitized = sanitized.replace(/(bearer\s+)[a-zA-Z0-9_\-\.]{8,}/gi, '$1[REDACTED_TOKEN]');
-
-  // Redact potential secret / password / key assignments
+  // 1. Redact multiline PEM/RSA private key blocks
   sanitized = sanitized.replace(
-    /(secret[_-]?key|password|token|api[_-]?key|auth[_-]?token|credential|access[_-]?key|secret)\s*[:=]\s*['"]?[^\s,'"\\;]+['"]?/gi,
+    /-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----/gi,
+    '[REDACTED_PRIVATE_KEY]'
+  );
+
+  // 2. Redact Authorization headers (Bearer, Basic, etc.)
+  sanitized = sanitized.replace(
+    /((?:^|[\r\n])\s*authorization\s*:\s*(?:bearer|basic)\s+)[^\r\n,;]+/gi,
+    '$1[REDACTED_AUTH]'
+  );
+
+  // 3. Redact standalone bearer tokens
+  sanitized = sanitized.replace(
+    /(bearer\s+)[a-zA-Z0-9_\-\.]{8,}/gi,
+    '$1[REDACTED_TOKEN]'
+  );
+
+  // 4. Redact URL basic authentication credentials (e.g. https://user:pass@host/path)
+  sanitized = sanitized.replace(
+    /([a-zA-Z][a-zA-Z0-9+.-]{1,16}:\/\/)(?:[^:\s\/@]+:[^@\s\/]+|[^@\s\/]+)@/g,
+    '$1[REDACTED_CREDENTIALS]@'
+  );
+
+  // 5. Redact query string credentials (e.g. ?api_key=xyz, &token=abc)
+  sanitized = sanitized.replace(
+    /([?&](?:api[_-]?key|apikey|token|access[_-]?token|secret|password|auth|client[_-]?secret|key|refresh[_-]?token)=)[^&\s]+/gi,
+    '$1[REDACTED]'
+  );
+
+  // 6. Redact potential secret / password / key assignments and environment variables
+  sanitized = sanitized.replace(
+    /(secret[_-]?key|password|token|api[_-]?key|auth[_-]?token|credential|access[_-]?key|secret|private[_-]?key|access[_-]?token|session[_-]?secret|database[_-]?url|client[_-]?secret|refresh[_-]?token)\s*[:=]\s*['"]?[^\s,'"\\;&\r\n]+['"]?/gi,
     '$1=[REDACTED]'
   );
 
-  // Redact user home paths e.g. /Users/username/ or /home/username/
-  sanitized = sanitized.replace(/(\/(?:Users|home)\/)[a-zA-Z0-9_.-]+(\/)/g, '$1[USER]$2');
+  // 7. Redact macOS and Linux user home paths e.g. /Users/username/ or /home/username/
+  sanitized = sanitized.replace(
+    /(\/(?:Users|home)\/)[a-zA-Z0-9_.-]+(\/)/g,
+    '$1[USER]$2'
+  );
+
+  // 8. Redact Windows absolute user paths e.g. C:\Users\username\
+  sanitized = sanitized.replace(
+    /([a-zA-Z]:\\(?:Users|Documents and Settings)\\[^\s"';,]+)/gi,
+    '[REDACTED_WIN_PATH]'
+  );
 
   // Truncate to bound length
   if (sanitized.length > maxLength) {

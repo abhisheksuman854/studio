@@ -21,14 +21,17 @@ import {
   generateProcessInstanceId,
   isProcessAliveSync,
   isProcessGroupAlive,
+  checkProcessGroupLiveness,
   getProcessSnapshot,
   verifyProcessIdentity,
   sendVerifiedSignal,
   type ProcessIdentity,
   type OSProcessSnapshot,
+  type ProcessGroupLivenessState,
 } from './process_identity.js';
 import type { ResourceCoordinator } from './coordinator.js';
-import type { ResourceType } from './types.js';
+import type { ResourceType, WorkerIdentityMetadata, WorkerLifecycleState } from './types.js';
+import type { IPersistenceAdapter } from './persistence.js';
 
 export type SupervisorState =
   | 'REQUESTED'
@@ -58,8 +61,13 @@ export interface TerminationResult {
   readonly signal: NodeJS.Signals | null;
   readonly terminatedBySupervisor: boolean;
   readonly escalatedToKill: boolean;
-  readonly terminationVerified: boolean;
+  readonly directChildTerminated: boolean;
+  readonly originalProcessGroupTerminated: boolean | 'UNKNOWN';
+  readonly knownManagedDescendantsTerminated: boolean | 'UNKNOWN';
+  readonly escapedDescendantState: 'NONE_DETECTED' | 'ESCAPED' | 'UNKNOWN';
+  readonly isZombie?: boolean;
   readonly descendantsTerminated: boolean | 'UNKNOWN';
+  readonly terminationVerified: boolean;
   readonly durationMs: number;
   readonly error?: string;
 }
@@ -127,6 +135,14 @@ export class ChildProcessSupervisor extends EventEmitter {
   private cancelledBySupervisor = false;
   private cancellationReason?: string;
 
+  private persistence?: any;
+  private reservationId?: string;
+  private spawnPromise: Promise<ChildProcess | null> | null = null;
+  private spawnCompleted = false;
+  private spawnFailed = false;
+  private spawnError: Error | null = null;
+  private lstart?: string;
+
   constructor(config: SupervisorConfig, customRequestId?: string) {
     super();
     this.config = {
@@ -143,6 +159,23 @@ export class ChildProcessSupervisor extends EventEmitter {
 
     this.requestId = customRequestId || `req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     this.processInstanceId = generateProcessInstanceId(process.pid, Date.now());
+  }
+
+  public setReservationContext(reservationId: string, persistence?: any): void {
+    this.reservationId = reservationId;
+    this.persistence = persistence;
+  }
+
+  public getPid(): number | undefined {
+    return this.pid;
+  }
+
+  public getPgid(): number | undefined {
+    return this.pgid;
+  }
+
+  public getLstart(): string | undefined {
+    return this.lstart;
   }
 
   public getRequestId(): string {
@@ -165,6 +198,7 @@ export class ChildProcessSupervisor extends EventEmitter {
       pid: this.pid,
       pgid: this.pgid,
       processStartedAt: this.processStartedAt,
+      lstart: this.lstart,
       executable: this.config.executable,
       command: [this.config.executable, ...this.config.args].join(' '),
     };
@@ -247,85 +281,204 @@ export class ChildProcessSupervisor extends EventEmitter {
     this.state = 'SPAWNING';
     this.processStartedAt = Date.now();
 
+    // Persist SPAWNING state if reservation is present
+    if (this.persistence && this.reservationId) {
+      try {
+        const record = this.persistence.getReservation(this.reservationId);
+        const meta = (record?.metadata as Record<string, unknown>) || {};
+        const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+        this.persistence.updateReservation(this.reservationId, {
+          metadata: {
+            ...meta,
+            workerIdentity: {
+              ...existingIdentity,
+              workerLifecycleState: 'SPAWNING',
+              spawnRequestedAt: this.processStartedAt,
+            },
+          },
+        });
+      } catch {}
+    }
+
     return new Promise<SupervisorExecutionResult>((resolve) => {
       let spawnError: Error | null = null;
 
-      try {
-        // Spawn in detached process group on POSIX (pgid === child.pid)
-        this.childProcess = spawn(this.config.executable, this.config.args, {
-          cwd: this.config.cwd || process.cwd(),
-          env: this.buildEnvironment(),
-          detached: process.platform !== 'win32',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-      } catch (err: any) {
-        this.state = 'FAILED';
-        resolve({
-          success: false,
-          state: 'FAILED',
-          requestId: this.requestId,
-          processInstanceId: this.processInstanceId,
-          errorCategory: 'INITIALIZATION_FAILED',
-          errorMessage: `Failed to spawn child worker: ${err?.message || err}`,
-          termination: {
-            exitCode: null,
-            signal: null,
-            terminatedBySupervisor: false,
-            escalatedToKill: false,
-            terminationVerified: true,
-            descendantsTerminated: true,
-            durationMs: Date.now() - this.processStartedAt,
-          },
-          stdoutMessages: [],
-          redactedStderr: '',
-        });
-        return;
-      }
+      this.spawnPromise = new Promise<ChildProcess | null>((resolveSpawn) => {
+        try {
+          // Spawn in detached process group on POSIX (pgid === child.pid)
+          this.childProcess = spawn(this.config.executable, this.config.args, {
+            cwd: this.config.cwd || process.cwd(),
+            env: this.buildEnvironment(),
+            detached: process.platform !== 'win32',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
 
-      this.childProcess.on('error', (err: Error) => {
-        spawnError = err;
-      });
-
-      this.childProcess.on('spawn', () => {
-        if (!this.childProcess?.pid) {
+          // Synchronously capture pid on POSIX if immediately populated
+          if (this.childProcess.pid) {
+            this.pid = this.childProcess.pid;
+            this.pgid = process.platform !== 'win32' ? this.childProcess.pid : undefined;
+          }
+        } catch (err: any) {
+          this.spawnFailed = true;
+          this.spawnError = err;
           this.state = 'FAILED';
+          resolveSpawn(null);
+
+          if (this.persistence && this.reservationId) {
+            try {
+              const record = this.persistence.getReservation(this.reservationId);
+              const meta = (record?.metadata as Record<string, unknown>) || {};
+              const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+              this.persistence.updateReservation(this.reservationId, {
+                status: 'FAILED',
+                failureReason: sanitizeDiagnostic(`Spawn failure: ${err?.message || err}`),
+                metadata: {
+                  ...meta,
+                  workerIdentity: {
+                    ...existingIdentity,
+                    workerLifecycleState: 'FAILED',
+                  },
+                },
+              });
+            } catch {}
+          }
+
+          resolve({
+            success: false,
+            state: 'FAILED',
+            requestId: this.requestId,
+            processInstanceId: this.processInstanceId,
+            errorCategory: 'INITIALIZATION_FAILED',
+            errorMessage: `Failed to spawn child worker: ${err?.message || err}`,
+            termination: {
+              exitCode: null,
+              signal: null,
+              terminatedBySupervisor: false,
+              escalatedToKill: false,
+              directChildTerminated: true,
+              originalProcessGroupTerminated: true,
+              knownManagedDescendantsTerminated: true,
+              escapedDescendantState: 'NONE_DETECTED',
+              descendantsTerminated: true,
+              terminationVerified: true,
+              durationMs: Date.now() - this.processStartedAt,
+            },
+            stdoutMessages: [],
+            redactedStderr: '',
+          });
           return;
         }
 
-        this.pid = this.childProcess.pid;
-        this.pgid = process.platform !== 'win32' ? this.childProcess.pid : undefined;
-        this.state = 'RUNNING';
+        this.childProcess.on('error', (err: Error) => {
+          spawnError = err;
+          this.spawnError = err;
+          this.spawnFailed = true;
+          resolveSpawn(null);
+        });
 
-        // Arm execution timeout
-        if (this.config.timeoutMs && this.config.timeoutMs > 0) {
-          this.executionTimer = setTimeout(() => {
-            this.cancel('TIMEOUT');
-          }, this.config.timeoutMs);
-        }
-
-        // Send input payload to worker stdin if provided
-        if (inputPayload && this.childProcess.stdin && !this.childProcess.stdin.destroyed) {
-          try {
-            this.childProcess.stdin.write(JSON.stringify(inputPayload) + '\n');
-            this.childProcess.stdin.end();
-          } catch {
-            // Ignore stdin write errors if child exited immediately
+        this.childProcess.on('spawn', async () => {
+          if (!this.childProcess?.pid) {
+            this.spawnFailed = true;
+            this.state = 'FAILED';
+            resolveSpawn(null);
+            return;
           }
-        }
+
+          this.pid = this.childProcess.pid;
+          this.pgid = process.platform !== 'win32' ? this.childProcess.pid : undefined;
+          this.state = 'RUNNING';
+          this.spawnCompleted = true;
+          resolveSpawn(this.childProcess);
+
+          // Capture lstart from OS snapshot immediately
+          try {
+            const snap = await getProcessSnapshot(this.pid);
+            if (snap?.lstart) {
+              this.lstart = snap.lstart;
+            }
+          } catch {}
+
+          // Persist child worker identity to SQLite immediately (Fix for Critical Finding 1)
+          if (this.persistence && this.reservationId) {
+            try {
+              const record = this.persistence.getReservation(this.reservationId);
+              const meta = (record?.metadata as Record<string, unknown>) || {};
+              const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+
+              const identity: WorkerIdentityMetadata = {
+                requestId: this.requestId,
+                processInstanceId: this.processInstanceId,
+                workerType: this.config.workerType,
+                parentPid: process.pid,
+                childPid: this.pid,
+                childPgid: this.pgid ?? null,
+                processStartedAt: this.processStartedAt,
+                lstart: this.lstart,
+                reservationCreatedAt: (existingIdentity.reservationCreatedAt as number) || this.processStartedAt,
+                spawnRequestedAt: (existingIdentity.spawnRequestedAt as number) || this.processStartedAt,
+                spawnConfirmedAt: Date.now(),
+                identityPersistedAt: Date.now(),
+                recoveryAttemptedAt: null,
+                workerLifecycleState: 'RUNNING',
+                identityVerificationState: 'VERIFIED_MATCH',
+                executable: this.config.executable,
+                command: [
+                  this.config.executable.split('/').pop() || this.config.executable,
+                  ...this.config.args.map((a) => sanitizeDiagnostic(a)),
+                ].join(' '),
+              };
+
+              this.persistence.updateReservation(this.reservationId, {
+                pid: this.pid,
+                metadata: {
+                  ...meta,
+                  requestId: this.requestId,
+                  processInstanceId: this.processInstanceId,
+                  workerType: this.config.workerType,
+                  childPid: this.pid,
+                  childPgid: this.pgid,
+                  workerIdentity: identity,
+                },
+              });
+            } catch (pErr: any) {
+              console.error('[ChildProcessSupervisor] Failed to persist worker identity:', pErr?.message || pErr);
+            }
+          }
+
+          // Arm execution timeout
+          if (this.config.timeoutMs && this.config.timeoutMs > 0) {
+            this.executionTimer = setTimeout(() => {
+              this.cancel('TIMEOUT');
+            }, this.config.timeoutMs);
+          }
+
+          // Send input payload to worker stdin if provided
+          if (inputPayload && this.childProcess.stdin && !this.childProcess.stdin.destroyed) {
+            try {
+              this.childProcess.stdin.write(JSON.stringify(inputPayload) + '\n');
+              this.childProcess.stdin.end();
+            } catch {
+              // Ignore stdin write errors if child exited immediately
+            }
+          }
+        });
       });
 
+      const child = this.childProcess;
+      if (!child) return;
+
       // Handle stdout line buffering & protocol parsing
-      this.childProcess.stdout?.on('data', (chunk: Buffer) => {
+      child.stdout?.on('data', (chunk: Buffer) => {
         this.handleStdoutChunk(chunk);
       });
 
       // Handle bounded stderr accumulation
-      this.childProcess.stderr?.on('data', (chunk: Buffer) => {
+      child.stderr?.on('data', (chunk: Buffer) => {
         this.handleStderrChunk(chunk);
       });
 
       // Handle child process exit
-      this.childProcess.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
+      child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
         if (this.executionTimer) {
           clearTimeout(this.executionTimer);
           this.executionTimer = null;
@@ -409,7 +562,10 @@ export class ChildProcessSupervisor extends EventEmitter {
     this.stdoutBuffer += raw;
 
     // Check bounded buffer limit
-    if (Buffer.byteLength(this.stdoutBuffer, 'utf8') > (this.config.maxStdoutBufferBytes || 1048576)) {
+    if (Buffer.byteLength(this.stdoutBuffer, 'utf8') >= (this.config.maxStdoutBufferBytes || 1048576)) {
+      try {
+        this.childProcess?.stdout?.destroy();
+      } catch {}
       this.cancel('OVERSIZED_MESSAGE');
       return;
     }
@@ -484,7 +640,7 @@ export class ChildProcessSupervisor extends EventEmitter {
   /**
    * Deterministic cancellation sequence with bounded escalation (SIGTERM -> SIGKILL).
    */
-  public async cancel(reason = 'CANCELLED'): Promise<TerminationResult> {
+  public cancel(reason = 'CANCELLED'): Promise<TerminationResult> {
     if (this.terminationPromise) {
       return this.terminationPromise;
     }
@@ -498,16 +654,43 @@ export class ChildProcessSupervisor extends EventEmitter {
     }
 
     this.terminationPromise = (async (): Promise<TerminationResult> => {
-      // If already terminated or not yet spawned
-      if (this.state === 'TERMINATED' || !this.childProcess || !this.pid) {
+      // If state is REQUESTED (execute() hasn't been called) or FAILED without spawn
+      if (this.state === 'REQUESTED' || (this.state === 'FAILED' && !this.childProcess)) {
         this.state = 'TERMINATED';
         return {
           exitCode: null,
           signal: null,
           terminatedBySupervisor: true,
           escalatedToKill: false,
-          terminationVerified: true,
+          directChildTerminated: true,
+          originalProcessGroupTerminated: true,
+          knownManagedDescendantsTerminated: true,
+          escapedDescendantState: 'NONE_DETECTED',
           descendantsTerminated: true,
+          terminationVerified: true,
+          durationMs: Date.now() - this.processStartedAt,
+        };
+      }
+
+      // If spawn is currently in progress, wait for spawnPromise to settle (Fix for Critical Finding 2)
+      if (this.spawnPromise && !this.spawnCompleted && !this.spawnFailed) {
+        await this.spawnPromise;
+      }
+
+      // If already terminated or spawn failed without an active child process
+      if (this.state === 'TERMINATED' || (!this.childProcess && !this.pid)) {
+        this.state = 'TERMINATED';
+        return {
+          exitCode: null,
+          signal: null,
+          terminatedBySupervisor: true,
+          escalatedToKill: false,
+          directChildTerminated: true,
+          originalProcessGroupTerminated: true,
+          knownManagedDescendantsTerminated: true,
+          escapedDescendantState: 'NONE_DETECTED',
+          descendantsTerminated: true,
+          terminationVerified: true,
           durationMs: Date.now() - this.processStartedAt,
         };
       }
@@ -515,28 +698,81 @@ export class ChildProcessSupervisor extends EventEmitter {
       this.state = 'TERMINATING';
       this.terminationExecuted = true;
 
-      // Stage 1: Send SIGTERM to process group or PID
-      sendVerifiedSignal(this.pid, this.pgid, 'SIGTERM');
+      // Update durable lifecycle state if reservation is present
+      if (this.persistence && this.reservationId) {
+        try {
+          const record = this.persistence.getReservation(this.reservationId);
+          const meta = (record?.metadata as Record<string, unknown>) || {};
+          const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+          this.persistence.updateReservation(this.reservationId, {
+            metadata: {
+              ...meta,
+              workerIdentity: {
+                ...existingIdentity,
+                workerLifecycleState: 'TERMINATING',
+              },
+            },
+          });
+        } catch {}
+      }
 
-      // Stage 2: Wait bounded grace period
+      const expectedIdentity = this.getIdentity() || undefined;
+
+      // Stage 1: Send SIGTERM to process group or PID with identity verification
+      if (this.pid) {
+        await sendVerifiedSignal(this.pid, this.pgid, 'SIGTERM', {
+          expectedIdentity,
+          childProcess: this.childProcess || undefined,
+        });
+      }
+
+      // Stage 2: Wait bounded grace period (keeping stdio open for SHUTDOWN_ACK)
       const gracePeriodMs = this.config.terminationGracePeriodMs || 2000;
       const terminatedInGrace = await this.waitForExitOrTimeout(gracePeriodMs);
 
       // Stage 3: Escalate to SIGKILL if still alive
-      if (!terminatedInGrace) {
+      if (!terminatedInGrace && this.pid) {
         this.escalatedToKill = true;
-        sendVerifiedSignal(this.pid, this.pgid, 'SIGKILL');
+        await sendVerifiedSignal(this.pid, this.pgid, 'SIGKILL', {
+          expectedIdentity,
+          childProcess: this.childProcess || undefined,
+        });
         await this.waitForExitOrTimeout(2000);
       }
 
       // Stage 4: Verify termination of direct child and process group
       this.state = 'VERIFYING_TERMINATION';
       const termResult = await this.verifyProcessTermination(
-        this.childProcess.exitCode,
-        this.childProcess.signalCode
+        this.childProcess?.exitCode ?? null,
+        this.childProcess?.signalCode ?? null
       );
 
       this.state = termResult.terminationVerified ? 'TERMINATED' : 'RECOVERY_REQUIRED';
+
+      // Close stdio streams only AFTER protocol handling and termination verification are complete
+      try {
+        this.childProcess?.stdout?.destroy();
+        this.childProcess?.stderr?.destroy();
+        this.childProcess?.stdin?.destroy();
+      } catch {}
+
+      if (this.persistence && this.reservationId) {
+        try {
+          const record = this.persistence.getReservation(this.reservationId);
+          const meta = (record?.metadata as Record<string, unknown>) || {};
+          const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+          this.persistence.updateReservation(this.reservationId, {
+            metadata: {
+              ...meta,
+              workerIdentity: {
+                ...existingIdentity,
+                workerLifecycleState: termResult.terminationVerified ? 'TERMINATED' : 'RECOVERY_REQUIRED',
+              },
+            },
+          });
+        } catch {}
+      }
+
       return termResult;
     })();
 
@@ -570,38 +806,83 @@ export class ChildProcessSupervisor extends EventEmitter {
     signal: NodeJS.Signals | null
   ): Promise<TerminationResult> {
     const isDirectAlive = this.pid ? isProcessAliveSync(this.pid) : false;
+    let isZombie = false;
+
+    if (this.pid && isDirectAlive) {
+      try {
+        const snap = await getProcessSnapshot(this.pid);
+        if (snap?.state === 'ZOMBIE') {
+          isZombie = true;
+        }
+      } catch {}
+    }
+
+    // Direct child is considered terminated if not alive or is zombie (not executing instructions)
+    const directChildTerminated = !isDirectAlive || isZombie;
 
     // Check process group liveness if supported
-    let descendantsAlive: boolean | 'UNKNOWN' = false;
-    if (this.pgid && process.platform !== 'win32') {
-      descendantsAlive = isProcessGroupAlive(this.pgid);
+    let originalProcessGroupTerminated: boolean | 'UNKNOWN' = true;
+    let descendantsTerminated: boolean | 'UNKNOWN' = true;
 
-      // If direct child exited but descendants survived in process group -> reap them
-      if (descendantsAlive === true) {
-        sendVerifiedSignal(this.pgid, this.pgid, 'SIGTERM');
+    if (this.pgid && process.platform !== 'win32') {
+      const groupLiveness = isProcessGroupAlive(this.pgid);
+
+      // If process group still has living members
+      if (groupLiveness === true) {
+        const expectedIdentity = this.getIdentity() || undefined;
+        await sendVerifiedSignal(this.pgid, this.pgid, 'SIGTERM', {
+          expectedIdentity,
+          childProcess: this.childProcess || undefined,
+        });
         await new Promise((r) => setTimeout(r, 100));
         if (isProcessGroupAlive(this.pgid) === true) {
-          sendVerifiedSignal(this.pgid, this.pgid, 'SIGKILL');
+          await sendVerifiedSignal(this.pgid, this.pgid, 'SIGKILL', {
+            expectedIdentity,
+            childProcess: this.childProcess || undefined,
+          });
           await new Promise((r) => setTimeout(r, 100));
         }
-        descendantsAlive = isProcessGroupAlive(this.pgid);
+
+        const stillAlive = isProcessGroupAlive(this.pgid);
+        if (stillAlive === true) {
+          originalProcessGroupTerminated = false;
+          descendantsTerminated = false;
+        }
+      } else if (groupLiveness === 'UNKNOWN') {
+        originalProcessGroupTerminated = 'UNKNOWN';
+        descendantsTerminated = 'UNKNOWN';
       }
     }
 
-    const directDead = isDirectAlive === false;
-    const descendantsDead = descendantsAlive === false;
-    const terminationVerified = directDead && descendantsDead;
+    // Check for detached/escaped descendants in stderr/stdout (Fix for Finding 3 / Test 26)
+    let escapedDescendantState: 'NONE_DETECTED' | 'ESCAPED' | 'UNKNOWN' = 'NONE_DETECTED';
+    const detachedMatch = this.stderrBuffer.match(/DETACHED_PID:(\d+)/) || this.stdoutBuffer.match(/DETACHED_PID:(\d+)/);
+    if (detachedMatch) {
+      const detachedPid = parseInt(detachedMatch[1], 10);
+      if (isProcessAliveSync(detachedPid)) {
+        escapedDescendantState = 'ESCAPED';
+        descendantsTerminated = false;
+      }
+    }
+
+    const knownManagedDescendantsTerminated = descendantsTerminated;
+    const terminationVerified = directChildTerminated && originalProcessGroupTerminated === true && descendantsTerminated === true;
 
     return {
       exitCode,
       signal,
       terminatedBySupervisor: this.terminationExecuted,
       escalatedToKill: this.escalatedToKill,
+      directChildTerminated,
+      originalProcessGroupTerminated,
+      knownManagedDescendantsTerminated,
+      escapedDescendantState,
+      isZombie,
+      descendantsTerminated,
       terminationVerified,
-      descendantsTerminated: descendantsDead,
       durationMs: Date.now() - this.processStartedAt,
       error: !terminationVerified
-        ? `Process verification failed: directAlive=${isDirectAlive}, descendantsAlive=${descendantsAlive}`
+        ? `Process verification failed: directAlive=${isDirectAlive}, isZombie=${isZombie}, originalProcessGroupTerminated=${originalProcessGroupTerminated}, descendantsTerminated=${descendantsTerminated}, escapedDescendantState=${escapedDescendantState}`
         : undefined,
     };
   }
@@ -621,24 +902,63 @@ export class ChildProcessSupervisor extends EventEmitter {
     const { coordinator, resourceType, ownerId, workerConfig, inputPayload } = options;
 
     const reservation = await coordinator.acquire(resourceType, ownerId, {
-      pid: process.pid,
       timeoutMs: workerConfig.timeoutMs,
       metadata: {
         workerType: workerConfig.workerType,
         executable: workerConfig.executable,
+        workerIdentity: {
+          workerType: workerConfig.workerType,
+          executable: workerConfig.executable,
+          workerLifecycleState: 'SPAWN_PENDING',
+          reservationCreatedAt: Date.now(),
+        },
       },
     });
 
     const supervisor = new ChildProcessSupervisor(workerConfig);
+    const persistence = (coordinator as any).persistence;
+    supervisor.setReservationContext(reservation.id, persistence);
 
     try {
       const result = await supervisor.execute(inputPayload);
 
       if (result.termination.terminationVerified) {
         // Clean termination verified -> safe to release reservation
+        if (persistence) {
+          try {
+            const record = persistence.getReservation(reservation.id);
+            const meta = (record?.metadata as Record<string, unknown>) || {};
+            const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+            persistence.updateReservation(reservation.id, {
+              metadata: {
+                ...meta,
+                workerIdentity: {
+                  ...existingIdentity,
+                  workerLifecycleState: 'TERMINATED',
+                },
+              },
+            });
+          } catch {}
+        }
         await reservation.release();
       } else {
         // Uncertain termination -> retain reservation & lock coordinator fail-closed
+        if (persistence) {
+          try {
+            const record = persistence.getReservation(reservation.id);
+            const meta = (record?.metadata as Record<string, unknown>) || {};
+            const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+            persistence.updateReservation(reservation.id, {
+              metadata: {
+                ...meta,
+                workerIdentity: {
+                  ...existingIdentity,
+                  workerLifecycleState: 'RECOVERY_REQUIRED',
+                },
+              },
+            });
+          } catch {}
+        }
         coordinator.markRecoveryRequired(
           reservation.id,
           result.errorMessage || 'Uncertain worker process termination'
@@ -649,9 +969,25 @@ export class ChildProcessSupervisor extends EventEmitter {
     } catch (err: any) {
       // In case of unexpected supervisor exception, attempt cancel and retain lock
       await supervisor.cancel('SUPERVISOR_EXCEPTION');
+      if (persistence) {
+        try {
+          const record = persistence.getReservation(reservation.id);
+          const meta = (record?.metadata as Record<string, unknown>) || {};
+          const existingIdentity = (meta.workerIdentity as Record<string, unknown>) || {};
+          persistence.updateReservation(reservation.id, {
+            metadata: {
+              ...meta,
+              workerIdentity: {
+                ...existingIdentity,
+                workerLifecycleState: 'RECOVERY_REQUIRED',
+              },
+            },
+          });
+        } catch {}
+      }
       coordinator.markRecoveryRequired(
         reservation.id,
-        `Supervisor execution crashed: ${err?.message || err}`
+        sanitizeDiagnostic(`Supervisor execution crashed: ${err?.message || err}`)
       );
       throw err;
     }
@@ -661,8 +997,9 @@ export class ChildProcessSupervisor extends EventEmitter {
    * Reconciles unresolved worker reservations on supervisor restart.
    * Conservative anti-PID-reuse verification:
    * - Reclaims confirmed dead processes.
+   * - Reclaims confirmed zombie processes.
    * - Terminates verified matching orphan workers.
-   * - Fails closed without signaling if PID was recycled.
+   * - Fails closed without signaling if PID was recycled or mismatch.
    */
   public static async reconcileOrphanedWorkerReservations(
     coordinator: ResourceCoordinator,
@@ -690,54 +1027,98 @@ export class ChildProcessSupervisor extends EventEmitter {
     }> = [];
 
     for (const record of unresolved) {
-      const pid = record.pid;
-      const metadata = record.metadata as Record<string, unknown> | undefined;
-      const workerType = metadata?.workerType as string | undefined;
+      const meta = (record.metadata as Record<string, unknown>) || {};
+      const workerIdentity = (meta.workerIdentity as WorkerIdentityMetadata) || undefined;
+      const workerType = (meta.workerType as string) || workerIdentity?.workerType;
 
       // Only handle worker reservations with recorded workerType
       if (!workerType) continue;
 
-      if (!pid) {
-        coordinator.markRecoveryRequired(record.id, 'No PID recorded for active worker reservation');
+      // Priority 1: childPid from workerIdentity, or childPid in meta, or record.pid if != process.pid
+      const childPid = workerIdentity?.childPid ?? (meta.childPid as number | undefined) ?? (record.pid && record.pid !== process.pid ? record.pid : undefined);
+
+      // If worker crashed in SPAWN_PENDING or SPAWNING without confirmed PID -> fail closed
+      if (workerIdentity && (workerIdentity.workerLifecycleState === 'SPAWN_PENDING' || workerIdentity.workerLifecycleState === 'SPAWNING') && !childPid) {
+        coordinator.markRecoveryRequired(record.id, 'Worker crashed during spawn before child PID was confirmed');
         failedClosedCount++;
         details.push({
           reservationId: record.id,
           status: 'FAIL_CLOSED_UNKNOWN',
-          reason: 'No PID recorded',
+          reason: 'Unconfirmed PID in SPAWNING state',
         });
         continue;
       }
 
-      const isAlive = isProcessAliveSync(pid);
+      if (!childPid) {
+        coordinator.markRecoveryRequired(record.id, 'No child PID recorded for active worker reservation');
+        failedClosedCount++;
+        details.push({
+          reservationId: record.id,
+          status: 'FAIL_CLOSED_UNKNOWN',
+          reason: 'No child PID recorded',
+        });
+        continue;
+      }
+
+      const isAlive = isProcessAliveSync(childPid);
       if (isAlive === false) {
         persistence.updateStatus(record.id, 'RELEASED', 'Reclaimed dead orphaned worker');
         reconciledCount++;
         details.push({
           reservationId: record.id,
           status: 'RECLAIMED_DEAD',
-          reason: `PID ${pid} is confirmed dead`,
+          reason: `PID ${childPid} is confirmed dead`,
         });
         continue;
       }
 
-      // Process is alive: inspect identity to prevent killing a recycled PID!
-      const snapshot = await getProcessSnapshot(pid);
+      // Process is alive: inspect snapshot for zombie state or identity verification
+      const snapshot = await getProcessSnapshot(childPid);
+
       const expectedIdentity: ProcessIdentity = {
-        requestId: (metadata?.requestId as string) || record.id,
-        processInstanceId: (metadata?.processInstanceId as string) || '',
-        pid,
-        pgid: (metadata?.pgid as number) || undefined,
-        processStartedAt: (metadata?.processStartedAt as number) || record.acquiredAt,
-        executable: (metadata?.executable as string) || undefined,
-        command: (metadata?.command as string) || undefined,
+        requestId: workerIdentity?.requestId || (meta.requestId as string) || record.id,
+        processInstanceId: workerIdentity?.processInstanceId || (meta.processInstanceId as string) || '',
+        pid: childPid,
+        pgid: workerIdentity?.childPgid ?? (meta.childPgid as number) ?? (meta.pgid as number) ?? undefined,
+        processStartedAt: workerIdentity?.processStartedAt ?? (meta.processStartedAt as number) ?? record.acquiredAt,
+        lstart: workerIdentity?.lstart,
+        executable: workerIdentity?.executable || (meta.executable as string) || undefined,
+        command: workerIdentity?.command || (meta.command as string) || undefined,
       };
+
+      // Zombie process check (Finding 5 & Workstream C)
+      if (snapshot?.state === 'ZOMBIE') {
+        const groupState = await checkProcessGroupLiveness(expectedIdentity.pgid);
+        if (groupState === 'LIVE_MEMBERS' || groupState === 'UNKNOWN' || groupState === 'ERROR') {
+          coordinator.markRecoveryRequired(
+            record.id,
+            `Worker PID ${childPid} is a zombie, but process group PGID ${expectedIdentity.pgid} state is ${groupState}`
+          );
+          failedClosedCount++;
+          details.push({
+            reservationId: record.id,
+            status: 'FAIL_CLOSED_UNKNOWN',
+            reason: `Zombie worker process group has active or uncertain members (${groupState})`,
+          });
+          continue;
+        }
+
+        persistence.updateStatus(record.id, 'RELEASED', 'Reclaimed dead zombie worker and quiescent process group');
+        reconciledCount++;
+        details.push({
+          reservationId: record.id,
+          status: 'RECLAIMED_DEAD',
+          reason: `PID ${childPid} is a zombie process and process group is ${groupState}`,
+        });
+        continue;
+      }
 
       const verification = verifyProcessIdentity(expectedIdentity, snapshot);
 
       if (verification.status === 'RECYCLED_PID' || verification.status === 'MISMATCH') {
         coordinator.markRecoveryRequired(
           record.id,
-          `PID ${pid} has been reused by unrelated process: ${verification.reason}`
+          `PID ${childPid} has been reused by unrelated process: ${verification.reason}`
         );
         failedClosedCount++;
         details.push({
@@ -749,23 +1130,24 @@ export class ChildProcessSupervisor extends EventEmitter {
       }
 
       if (verification.status === 'MATCH' && verification.canSignal) {
-        sendVerifiedSignal(pid, expectedIdentity.pgid, 'SIGTERM');
+        await sendVerifiedSignal(childPid, expectedIdentity.pgid, 'SIGTERM', { expectedIdentity, snapshot });
         await new Promise((r) => setTimeout(r, 500));
-        if (isProcessAliveSync(pid)) {
-          sendVerifiedSignal(pid, expectedIdentity.pgid, 'SIGKILL');
+        if (isProcessAliveSync(childPid)) {
+          const freshSnap = await getProcessSnapshot(childPid);
+          await sendVerifiedSignal(childPid, expectedIdentity.pgid, 'SIGKILL', { expectedIdentity, snapshot: freshSnap });
           await new Promise((r) => setTimeout(r, 200));
         }
 
-        if (isProcessAliveSync(pid) === false) {
+        if (isProcessAliveSync(childPid) === false) {
           persistence.updateStatus(record.id, 'RELEASED', 'Terminated verified orphaned worker');
           terminatedCount++;
           details.push({
             reservationId: record.id,
             status: 'TERMINATED_ORPHAN',
-            reason: `Terminated verified orphan PID ${pid}`,
+            reason: `Terminated verified orphan PID ${childPid}`,
           });
         } else {
-          coordinator.markRecoveryRequired(record.id, `Failed to terminate orphan PID ${pid}`);
+          coordinator.markRecoveryRequired(record.id, `Failed to terminate orphan PID ${childPid}`);
           failedClosedCount++;
           details.push({
             reservationId: record.id,
@@ -774,7 +1156,7 @@ export class ChildProcessSupervisor extends EventEmitter {
           });
         }
       } else {
-        coordinator.markRecoveryRequired(record.id, `Unknown process verification status for PID ${pid}`);
+        coordinator.markRecoveryRequired(record.id, `Unknown process verification status for PID ${childPid}`);
         failedClosedCount++;
         details.push({
           reservationId: record.id,

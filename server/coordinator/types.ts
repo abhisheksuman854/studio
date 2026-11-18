@@ -42,6 +42,44 @@ export type ReservationStatus =
   | 'CANCELLED'
   | 'TIMED_OUT';
 
+export type WorkerLifecycleState =
+  | 'SPAWN_PENDING'
+  | 'SPAWNING'
+  | 'RUNNING'
+  | 'TERMINATING'
+  | 'VERIFYING_TERMINATION'
+  | 'TERMINATED'
+  | 'FAILED'
+  | 'RECOVERY_REQUIRED';
+
+export type IdentityVerificationState =
+  | 'UNVERIFIED'
+  | 'VERIFIED_MATCH'
+  | 'RECYCLED_PID'
+  | 'MISMATCH'
+  | 'AMBIGUOUS'
+  | 'DEAD';
+
+export interface WorkerIdentityMetadata {
+  readonly requestId: string;
+  readonly processInstanceId: string;
+  readonly workerType: string;
+  readonly parentPid: number;
+  readonly childPid: number | null;
+  readonly childPgid: number | null;
+  readonly processStartedAt: number | null;
+  readonly lstart?: string;
+  readonly reservationCreatedAt: number;
+  readonly spawnRequestedAt: number | null;
+  readonly spawnConfirmedAt: number | null;
+  readonly identityPersistedAt: number | null;
+  readonly recoveryAttemptedAt: number | null;
+  readonly workerLifecycleState: WorkerLifecycleState;
+  readonly identityVerificationState: IdentityVerificationState;
+  readonly executable?: string;
+  readonly command?: string;
+}
+
 export interface ReservationRequestOptions {
   readonly pid?: number;
   readonly timeoutMs?: number;

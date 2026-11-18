@@ -218,6 +218,7 @@ test('11. Anti-PID-Reuse: detects recycled PID when executable command mismatche
     pid: 99999,
     ppid: 1,
     pgid: 99999,
+    state: 'RUNNING' as const,
     lstart: 'Tue Nov 17 12:00:00 2026',
     command: '/usr/bin/unrelated_daemon', // Unrelated process that inherited PID
   };
@@ -491,7 +492,12 @@ test('26. Dummy Worker 13 (Detaches From Process Group): limitation detected on 
   });
 
   const result = await supervisor.execute();
-  assert.equal(result.state, 'FAILED'); // Exited without terminal message
+  assert.equal(result.state, 'RECOVERY_REQUIRED'); // Failed-closed because detached descendant escaped termination verification
+
+  // Verify that supervisor accurately detects escaped descendant and refuses to certify termination
+  assert.equal(result.termination.escapedDescendantState, 'ESCAPED');
+  assert.equal(result.termination.descendantsTerminated, false);
+  assert.equal(result.termination.terminationVerified, false);
 
   // Extract detached PID from stderr and clean it up safely in test harness
   const match = result.redactedStderr.match(/DETACHED_PID:(\d+)/);
