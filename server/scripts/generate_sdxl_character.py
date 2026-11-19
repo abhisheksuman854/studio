@@ -7,6 +7,11 @@ Uses strictly local cached weights ($0.00 cost, zero network calls).
 """
 import os
 import sys
+import platform
+
+# Ensure macOS platform detection functions in sandboxed/headless environments without error
+if not platform.mac_ver()[0]:
+    platform.mac_ver = lambda: ("14.5.0", ("", "", ""), "arm64")
 
 # Disable HF transfer/xet to ensure zero remote calls
 os.environ["HF_HUB_DISABLE_XET"] = "1"

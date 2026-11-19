@@ -110,6 +110,8 @@ export interface MotionGenerationResult {
   preset: string;
   durationSec: number;
   dimensions: [number, number];
+  width?: number;
+  height?: number;
   fps: number;
   frameCount: number;
   fileSize: number;
@@ -638,7 +640,7 @@ export class MotionGeneratorProvider {
     const outputPath = options.outputVideoPath || path.join(videosDir, outFilename);
     const videoUrl = `/api/media/videos/${outFilename}`;
 
-    const isTestMode = options.testMock || process.env.NODE_ENV === 'test' || process.env.AURAVO_TEST_MOCK_GEN === '1';
+    const isTestMockRequested = options.testMock === true || process.env.AURAVO_TEST_MOCK_GEN === '1';
 
     // 5. Resource coordinator admission reservation if active
     let reservationId: string | null = null;
@@ -667,17 +669,19 @@ export class MotionGeneratorProvider {
       let cornerRegionDiff = 0.0;
       let firstFrameDiffToSource = 0.0;
 
-      const pythonCandidates = [
-        process.env.AURAVO_PYTHON_BIN,
-        path.resolve(process.env.HOME || '', '.pyenv/versions/3.10.6/bin/python3'),
-        '/opt/homebrew/bin/python3',
-        'python3',
-      ].filter(Boolean) as string[];
+      const pythonCandidates = process.env.AURAVO_PYTHON_BIN
+        ? [process.env.AURAVO_PYTHON_BIN]
+        : [
+            path.resolve(process.env.HOME || '', '.local/share/auravo/venvs/phase2a/bin/python'),
+            path.resolve(process.env.HOME || '', '.pyenv/versions/3.10.6/bin/python3'),
+            '/opt/homebrew/bin/python3',
+            'python3',
+          ].filter(Boolean) as string[];
 
       const scriptPath = path.resolve('./server/scripts/generate_motion.py');
       let pythonRan = false;
 
-      if (!isTestMode && fs.existsSync(scriptPath)) {
+      if (fs.existsSync(scriptPath) && !isTestMockRequested) {
         for (const pyBin of pythonCandidates) {
           if (!fs.existsSync(pyBin)) continue;
           try {
@@ -732,9 +736,14 @@ export class MotionGeneratorProvider {
         }
       }
 
-      // Fast mock mode when in automated unit tests
+      // If genuine Python generation did not run, evaluate mock fallback rules
       if (!pythonRan) {
-        modelUsed = 'AURAVO_LOCAL_KINEMATIC_FFMPEG_MOCK_V1';
+        if (!isTestMockRequested) {
+          throw new Error(
+            '[GENUINE_ANIMATION_FAILED] Genuine local kinematic character animation failed: No compatible Python runtime with PyTorch available or process exited without output. Silent mock fallback rejected in production.'
+          );
+        }
+        modelUsed = 'AURAVO_MOCK_KINEMATIC_DEV_ONLY';
         licence = 'GPL/LGPL (FFmpeg lavfi)';
         const mockResult = await generateMockKinematicVideo(outputPath, options.preset, duration, fps);
         meanDiff = mockResult.meanDiff;
@@ -759,6 +768,8 @@ export class MotionGeneratorProvider {
         preset: options.preset,
         durationSec: validation.durationSec,
         dimensions: validation.dimensions,
+        width: validation.dimensions[0],
+        height: validation.dimensions[1],
         fps: validation.fps,
         frameCount: validation.frameCount,
         fileSize: validation.fileSize,

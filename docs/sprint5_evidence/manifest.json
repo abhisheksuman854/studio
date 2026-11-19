@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-11-19T14:15:00.000Z",
+  "documentId": "AURAVO-PRODUCT-SPRINT-5-GENUINE-CHARACTER-ANIMATION",
+  "videoFile": "/Users/abhisheksuman/Documents/GitHub/studio/data/storage/videos/aria_dev_genuine_wave_sprint5.mp4",
+  "videoSha256": "b788ad914d9f8da4cbf33a869218c8bae1f69680749a290017afd8dfb27cd188",
+  "videoSizeBytes": 100185,
+  "generatorOutput": {
+    "ok": true,
+    "preset": "wave",
+    "frameCount": 60,
+    "durationSec": 2.0,
+    "fps": 30,
+    "dimensions": [
+      768,
+      1024
+    ],
+    "fileSize": 100185,
+    "sha256": "b788ad914d9f8da4cbf33a869218c8bae1f69680749a290017afd8dfb27cd188",
+    "meanFrameDiff": 0.008273,
+    "maxFrameDiff": 0.870559,
+    "armRegionDiff": 0.043351,
+    "faceRegionDiff": 0.001058,
+    "cornerRegionDiff": 0.0,
+    "firstFrameDiffToSource": 0.0,
+    "runtimeSec": 1.52,
+    "outputPath": "/Users/abhisheksuman/Documents/GitHub/studio/data/storage/videos/aria_dev_genuine_wave_sprint5.mp4",
+    "modelUsed": "AURAVO_LOCAL_KINEMATIC_PYTORCH_V1",
+    "licence": "BSD-3-Clause (PyTorch Tensor Engine) + GPL/LGPL (FFmpeg)"
+  },
+  "ffprobe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "width": 768,
+        "height": 1024,
+        "pix_fmt": "yuv420p",
+        "r_frame_rate": "30/1",
+        "duration": "2.000000",
+        "nb_frames": "60"
+      }
+    ],
+    "format": {
+      "duration": "2.000000",
+      "size": "100185",
+      "bit_rate": "400740"
+    }
+  },
+  "contactSheet": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/aria_wave_contact_sheet.png",
+  "frames": [
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/frame_01_start.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/frame_02_rising.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/frame_03_wave_peak.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/frame_04_wave_trough.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/frame_05_wave_secondary.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/frame_06_settle.png"
+  ],
+  "heatmap": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_evidence/aria_wave_motion_heatmap.png"
+}

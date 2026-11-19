@@ -1,0 +1,95 @@
+{
+  "sprint": "5.2",
+  "candidates": [
+    {
+      "candidate_id": 1,
+      "filename": "candidate_1.png",
+      "path": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_2_evidence/candidate_1.png",
+      "seed": 101,
+      "prompt": "Photorealistic studio portrait of Aria Dev, a 26-year-old female creative technologist and AI engineer, South Asian heritage, warm expressive hazel-brown eyes, natural subtle smile, authentic skin texture with natural fine pores and soft tonal variation, dark brown wavy hair with individual strands and natural hairline, wearing an elegant tailored emerald green silk blouse with delicate gold embroidery, sharp focus, 85mm f/1.8 portrait lens, cinematic soft studio lighting, ultra-realistic human photograph",
+      "negative_prompt": "illustration, drawing, painting, 3d render, cartoon, anime, vector art, graphic novel, doll, wax, plastic skin, overly smooth, airbrushed, deformed eyes, crossed eyes, bad pupils, deformed nose, deformed mouth, extra limbs, bad anatomy, blurry, oversaturated, low resolution",
+      "model": "stabilityai/stable-diffusion-xl-base-1.0 + ByteDance/SDXL-Lightning",
+      "model_license": "CreativeML Open RAIL++-M / Apache 2.0 (FREE_OPEN_SOURCE_LOCAL)",
+      "dimensions": [
+        1024,
+        1024
+      ],
+      "file_size_bytes": 1141686,
+      "sha256": "366774fd32dfb226f0720789dfd4d784b7a68ee5e15830ccc57529a8fb45e6d8",
+      "steps": 4,
+      "guidance_scale": 0,
+      "timings": {
+        "denoise_seconds": 6.58,
+        "vae_seconds": 31.01,
+        "total_seconds": 38.67
+      },
+      "pixel_stats": {
+        "min": 0,
+        "max": 252,
+        "mean": 109.37,
+        "std": 51.37,
+        "unique_colors": 75600
+      }
+    },
+    {
+      "candidate_id": 2,
+      "filename": "candidate_2.png",
+      "path": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_2_evidence/candidate_2.png",
+      "seed": 202,
+      "prompt": "Photorealistic studio portrait of Aria Dev, a 26-year-old female creative technologist and AI engineer, South Asian heritage, warm expressive hazel-brown eyes, natural subtle smile, authentic skin texture with natural fine pores and soft tonal variation, dark brown wavy hair with individual strands and natural hairline, wearing an elegant tailored emerald green silk blouse with delicate gold embroidery, sharp focus, 85mm f/1.8 portrait lens, cinematic soft studio lighting, ultra-realistic human photograph",
+      "negative_prompt": "illustration, drawing, painting, 3d render, cartoon, anime, vector art, graphic novel, doll, wax, plastic skin, overly smooth, airbrushed, deformed eyes, crossed eyes, bad pupils, deformed nose, deformed mouth, extra limbs, bad anatomy, blurry, oversaturated, low resolution",
+      "model": "stabilityai/stable-diffusion-xl-base-1.0 + ByteDance/SDXL-Lightning",
+      "model_license": "CreativeML Open RAIL++-M / Apache 2.0 (FREE_OPEN_SOURCE_LOCAL)",
+      "dimensions": [
+        1024,
+        1024
+      ],
+      "file_size_bytes": 1278616,
+      "sha256": "9ae2fd8657b489d0d6b08db868682e1ebeebc4739ffc4287d9dd1f9cb3ccee9c",
+      "steps": 4,
+      "guidance_scale": 0,
+      "timings": {
+        "denoise_seconds": 23.8,
+        "vae_seconds": 31.34,
+        "total_seconds": 55.91
+      },
+      "pixel_stats": {
+        "min": 0,
+        "max": 253,
+        "mean": 80.97,
+        "std": 53.98,
+        "unique_colors": 111932
+      }
+    },
+    {
+      "candidate_id": 3,
+      "filename": "candidate_3.png",
+      "path": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_2_evidence/candidate_3.png",
+      "seed": 303,
+      "prompt": "Photorealistic studio portrait of Aria Dev, a 26-year-old female creative technologist and AI engineer, South Asian heritage, warm expressive hazel-brown eyes, natural subtle smile, authentic skin texture with natural fine pores and soft tonal variation, dark brown wavy hair with individual strands and natural hairline, wearing an elegant tailored emerald green silk blouse with delicate gold embroidery, sharp focus, 85mm f/1.8 portrait lens, cinematic soft studio lighting, ultra-realistic human photograph",
+      "negative_prompt": "illustration, drawing, painting, 3d render, cartoon, anime, vector art, graphic novel, doll, wax, plastic skin, overly smooth, airbrushed, deformed eyes, crossed eyes, bad pupils, deformed nose, deformed mouth, extra limbs, bad anatomy, blurry, oversaturated, low resolution",
+      "model": "stabilityai/stable-diffusion-xl-base-1.0 + ByteDance/SDXL-Lightning",
+      "model_license": "CreativeML Open RAIL++-M / Apache 2.0 (FREE_OPEN_SOURCE_LOCAL)",
+      "dimensions": [
+        1024,
+        1024
+      ],
+      "file_size_bytes": 1065940,
+      "sha256": "33b2d34a1bb7cc206e411c09d6411e66ea58f9db15e4e2fb5f16406ce0292db3",
+      "steps": 4,
+      "guidance_scale": 0,
+      "timings": {
+        "denoise_seconds": 22.8,
+        "vae_seconds": 32.89,
+        "total_seconds": 56.44
+      },
+      "pixel_stats": {
+        "min": 0,
+        "max": 252,
+        "mean": 130.27,
+        "std": 53.13,
+        "unique_colors": 69389
+      }
+    }
+  ]
+}

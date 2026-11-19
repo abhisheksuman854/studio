@@ -171,17 +171,55 @@ def main():
     torso_dist = ((base_grid[..., 0] - torso_cx)**2 / 0.20) + ((base_grid[..., 1] - torso_cy)**2 / 0.22)
     torso_mask = torch.exp(-torso_dist)
 
-    # Anatomical Right Arm pivots and masks (Upper-right quadrant)
-    shoulder_x, shoulder_y = 0.38, 0.02
-    elbow_x, elbow_y = 0.62, -0.10
+    # 2D helper: rotate vectors [..., 2] by scalar angle (radians)
+    def rot2d(vecs, angle):
+        c = math.cos(angle)
+        s = math.sin(angle)
+        vx = vecs[..., 0]
+        vy = vecs[..., 1]
+        rx = vx * c - vy * s
+        ry = vx * s + vy * c
+        return torch.stack((rx, ry), dim=-1)
 
-    # Shoulder/bicep mask (connects right shoulder to elbow)
-    dist_bicep = ((base_grid[..., 0] - 0.48)**2 / 0.05) + ((base_grid[..., 1] - (-0.02))**2 / 0.05)
-    bicep_mask = torch.exp(-dist_bicep) * (base_grid[..., 0] > 0.32).float()
+    def dist_to_segment(p, a, b):
+        ab = b - a
+        ab_len_sq = (ab**2).sum()
+        ap = p - a
+        t_val = (ap * ab).sum(dim=-1, keepdim=True) / (ab_len_sq + 1e-8)
+        t_clamped = torch.clamp(t_val, 0.0, 1.0)
+        closest = a + t_clamped * ab
+        return torch.norm(p - closest, dim=-1)
 
-    # Forearm & hand mask (from elbow extending to hand)
-    dist_forearm = ((base_grid[..., 0] - 0.66)**2 / 0.06) + ((base_grid[..., 1] - (-0.38))**2 / 0.12)
-    forearm_mask = torch.exp(-dist_forearm) * (base_grid[..., 0] > 0.45).float() * (base_grid[..., 1] < 0.05).float()
+    # Anatomical Right Arm Joint Hierarchy for Aria Dev & humanoid portraits
+    # Shoulder J0: (525, 520) in 768x1024 -> normalized (0.367, 0.016)
+    # Elbow J1:    (625, 460) in 768x1024 -> normalized (0.628, -0.102)
+    # Wrist J2:    (660, 315) in 768x1024 -> normalized (0.719, -0.385)
+    # Hand Tip J3: (670, 218) in 768x1024 -> normalized (0.730, -0.570)
+    j0 = torch.tensor([0.367, 0.016], dtype=torch.float32)
+    j1 = torch.tensor([0.628, -0.102], dtype=torch.float32)
+    j2 = torch.tensor([0.719, -0.385], dtype=torch.float32)
+    j3 = torch.tensor([0.730, -0.570], dtype=torch.float32)
+
+    # Precalculate Linear Blend Skinning (LBS) Partition of Unity weights
+    if preset_key == "wave":
+        d_upper = dist_to_segment(base_grid, j0, j1).squeeze(0)
+        d_forearm = dist_to_segment(base_grid, j1, j2).squeeze(0)
+        d_hand = dist_to_segment(base_grid, j2, j3).squeeze(0)
+
+        arm_gate = (base_grid[0, ..., 0] > (j0[0] - 0.08)).float() * (base_grid[0, ..., 1] < 0.28).float()
+        head_prot = head_mask[0]
+
+        raw_w1 = torch.exp(- (d_upper**2) / (2 * (0.075**2))) * arm_gate * (1.0 - head_prot)
+        raw_w2 = torch.exp(- (d_forearm**2) / (2 * (0.065**2))) * arm_gate * (1.0 - head_prot)
+        raw_w3 = torch.exp(- (d_hand**2) / (2 * (0.060**2))) * arm_gate * (1.0 - head_prot)
+
+        raw_w0 = torch.clamp(1.0 - (raw_w1 + raw_w2 + raw_w3), min=0.0)
+        w_sum = raw_w0 + raw_w1 + raw_w2 + raw_w3 + 1e-8
+        skin_w0 = (raw_w0 / w_sum).unsqueeze(-1)
+        skin_w1 = (raw_w1 / w_sum).unsqueeze(-1)
+        skin_w2 = (raw_w2 / w_sum).unsqueeze(-1)
+        skin_w3 = (raw_w3 / w_sum).unsqueeze(-1)
+        p_base = base_grid.squeeze(0)
 
     # Left arm region (mid left, x < -0.1)
     l_arm_pivot_x, l_arm_pivot_y = -0.38, 0.02
@@ -205,30 +243,39 @@ def main():
         deformed_grid = base_grid.clone()
 
         if preset_key == "wave":
-            # Genuine harmonic 2D kinematic wave:
-            # Right arm articulates smoothly around shoulder and elbow pivots
-            wave_angle = math.sin(t * 2.0 * math.pi * 1.5) * 0.36 # ~21 degrees oscillation
+            # Hierarchical 2D Kinematic Bone Chain with Linear Blend Skinning (LBS)
+            # Smooth C^1 envelope guarantees zero initial and final velocity (perfect rest pose continuity)
+            u = float(i) / max(1, total_frames - 1)
+            env = math.sin(math.pi * u) ** 2
 
-            # 1. Subtle shoulder/bicep sway (connects torso seamlessly to arm)
-            sh_ang = wave_angle * 0.20
-            dx_s = base_grid[..., 0] - shoulder_x
-            dy_s = base_grid[..., 1] - shoulder_y
-            rot_sx = dx_s * math.cos(sh_ang) - dy_s * math.sin(sh_ang)
-            rot_sy = dx_s * math.sin(sh_ang) + dy_s * math.cos(sh_ang)
-            deformed_grid[..., 0] += (rot_sx - dx_s) * bicep_mask
-            deformed_grid[..., 1] += (rot_sy - dy_s) * bicep_mask
+            # Dynamic wave oscillations: exactly 2 complete wave cycles over duration
+            # Shoulder: subtle supportive lift
+            # Forearm: natural elbow articulation (+/- 12 degrees)
+            # Hand/Wrist: fluid articulation with natural phase lag (+/- 10 degrees)
+            theta1 = math.radians(3.5) * math.sin(4.0 * math.pi * u) * env
+            theta2 = math.radians(12.0) * math.sin(4.0 * math.pi * u) * env
+            theta3 = math.radians(10.0) * math.sin(4.0 * math.pi * u - 0.20 * math.pi) * env
 
-            # 2. Forearm & hand articulation around elbow pivot
-            arm_ang = wave_angle * 0.80
-            dx_e = base_grid[..., 0] - elbow_x
-            dy_e = base_grid[..., 1] - elbow_y
-            rot_ex = dx_e * math.cos(arm_ang) - dy_e * math.sin(arm_ang)
-            rot_ey = dx_e * math.sin(arm_ang) + dy_e * math.cos(arm_ang)
-            deformed_grid[..., 0] += (rot_ex - dx_e) * forearm_mask
-            deformed_grid[..., 1] += (rot_ey - dy_e) * forearm_mask
+            alpha1 = theta1
+            alpha2 = theta1 + theta2
+            alpha3 = theta1 + theta2 + theta3
 
-            # 3. Organic breathing counter-sway (torso only, head and background stable)
-            deformed_grid[..., 1] -= 0.004 * math.sin(t * 2.0 * math.pi * 0.75) * torso_mask
+            # Forward kinematics for joint positions
+            j1_prime = rot2d((j1 - j0).unsqueeze(0), alpha1).squeeze(0) + j0
+            j2_prime = rot2d((j2 - j1).unsqueeze(0), alpha2).squeeze(0) + j1_prime
+
+            # Inverse rigid bone transforms
+            p0 = p_base
+            p1 = rot2d(p_base - j0, -alpha1) + j0
+            p2 = rot2d(p_base - j1_prime, -alpha2) + j1
+            p3 = rot2d(p_base - j2_prime, -alpha3) + j2
+
+            # Linear Blend Skinning: partition of unity ensures seamless joints & zero finger distortion
+            p_src = skin_w0 * p0 + skin_w1 * p1 + skin_w2 * p2 + skin_w3 * p3
+
+            # Organic subtle breathing on torso
+            deformed_grid = p_src.unsqueeze(0).clone()
+            deformed_grid[..., 1] -= 0.003 * math.sin(t * 2.0 * math.pi * 0.75) * torso_mask
 
         elif preset_key == "head_turn":
             yaw = math.sin(t * 2.0 * math.pi * 0.8) * 0.075

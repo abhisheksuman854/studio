@@ -1,0 +1,64 @@
+{
+  "timestamp": "2026-11-19T14:45:00.000Z",
+  "documentId": "AURAVO-PRODUCT-SPRINT-5.1-NATURAL-WAVE-REFINEMENT",
+  "videoFile": "/Users/abhisheksuman/Documents/GitHub/studio/data/storage/videos/aria_dev_natural_wave_sprint5_1.mp4",
+  "videoSha256": "399dbfde5798ff7dc603f0080a9a0ba64c5dcccda53e17a4911a1374ddc2078f",
+  "videoSizeBytes": 85283,
+  "generatorOutput": {
+    "ok": true,
+    "preset": "wave",
+    "frameCount": 60,
+    "durationSec": 2.0,
+    "fps": 30,
+    "dimensions": [
+      768,
+      1024
+    ],
+    "fileSize": 85283,
+    "sha256": "399dbfde5798ff7dc603f0080a9a0ba64c5dcccda53e17a4911a1374ddc2078f",
+    "meanFrameDiff": 0.007686,
+    "maxFrameDiff": 0.882353,
+    "armRegionDiff": 0.044295,
+    "faceRegionDiff": 0.001554,
+    "cornerRegionDiff": 0.0,
+    "firstFrameDiffToSource": 0.0,
+    "runtimeSec": 1.91,
+    "outputPath": "/Users/abhisheksuman/Documents/GitHub/studio/data/storage/videos/aria_dev_natural_wave_sprint5_1.mp4",
+    "modelUsed": "AURAVO_LOCAL_KINEMATIC_PYTORCH_V1",
+    "licence": "BSD-3-Clause (PyTorch Tensor Engine) + GPL/LGPL (FFmpeg)"
+  },
+  "ffprobe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "width": 768,
+        "height": 1024,
+        "pix_fmt": "yuv420p",
+        "r_frame_rate": "30/1",
+        "duration": "2.000000",
+        "nb_frames": "60"
+      }
+    ],
+    "format": {
+      "duration": "2.000000",
+      "size": "85283",
+      "bit_rate": "341132"
+    }
+  },
+  "contactSheet": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/aria_wave_contact_sheet_sprint5_1.png",
+  "frames": [
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_01_t0_00_rest_start.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_02_t0_25_outward_peak1.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_03_t0_50_inward_cross1.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_04_t0_75_inward_trough1.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_05_t1_00_midpoint_center.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_06_t1_25_outward_peak2.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_07_t1_75_inward_trough2.png",
+    "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/frame_08_t2_00_rest_settle.png"
+  ],
+  "handComparison": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/hand_comparison_original_vs_peak.png",
+  "heatmap": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/aria_wave_motion_heatmap_sprint5_1.png",
+  "beforeAfter": "/Users/abhisheksuman/Documents/GitHub/studio/docs/sprint5_1_evidence/before_after_comparison_sprint5_vs_5_1.png"
+}
