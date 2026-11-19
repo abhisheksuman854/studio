@@ -10,6 +10,11 @@ import {
   type ExperimentsPayload,
   type HistoricalExperiment
 } from './experiments_views';
+import {
+  DashboardView,
+  ProjectsView,
+  AssetLibraryView,
+} from './product_views';
 
 type Row = Record<string, any>;
 
@@ -3036,7 +3041,7 @@ const REGION_PRESETS: Record<string, { appearance: string; clothingStyle: string
   },
 };
 
-function CharactersStudio({ brands }: { brands: Row[] }) {
+function CharactersStudio({ brands, onAnimateCharacter }: { brands: Row[]; onAnimateCharacter?: (char: Row) => void }) {
   const [selectedBrandId, setSelectedBrandId] = useState<number>(brands[0]?.id || 0);
   const [archetypes, setArchetypes] = useState<any[]>([]);
   const [characters, setCharacters] = useState<Row[]>([]);
@@ -3790,23 +3795,33 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
                       )}
                     </div>
 
-                    <div style={{ display: 'flex', gap: 6, marginTop: 10, justifyContent: 'flex-end' }}>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                       <button
                         type="button"
                         className="btn btn-outline"
                         style={{ fontSize: 11, padding: '3px 8px', color: '#38bdf8', borderColor: '#38bdf8' }}
                         onClick={() => setSelectedCharacterModal(c)}
                       >
-                        🔍 Reopen Dossier
+                        🔍 Dossier
                       </button>
+                      {onAnimateCharacter && (
+                        <button
+                          type="button"
+                          className="btn btn-gold"
+                          style={{ fontSize: 11, padding: '3px 8px', display: 'flex', alignItems: 'center', gap: 4 }}
+                          onClick={() => onAnimateCharacter(c)}
+                        >
+                          🎬 Animate
+                        </button>
+                      )}
                       <button
                         type="button"
-                        className="btn btn-gold"
+                        className="btn btn-outline"
                         style={{ fontSize: 11, padding: '3px 8px' }}
                         onClick={() => handleAnimateFace(c.id, c.name)}
                         disabled={animatingCharId === c.id}
                       >
-                        {animatingCharId === c.id ? '⏳ Animate...' : '✨ Animate Face'}
+                        {animatingCharId === c.id ? '⏳ Animate...' : '✨ LivePortrait'}
                       </button>
                     </div>
                   </div>
@@ -3918,11 +3933,25 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
                 </div>
               </div>
 
-              <div style={{ marginTop: 20, display: 'flex', gap: 10 }}>
+              <div style={{ marginTop: 20, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {onAnimateCharacter && (
+                  <button
+                    type="button"
+                    className="btn btn-gold"
+                    style={{ flex: 1, minWidth: 160, padding: '10px 14px', fontSize: 12, fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                    onClick={() => {
+                      const char = selectedCharacterModal;
+                      setSelectedCharacterModal(null);
+                      onAnimateCharacter(char);
+                    }}
+                  >
+                    🎬 Animate in Motion Studio
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="btn btn-gold"
-                  style={{ flex: 1, padding: '10px 14px', fontSize: 12, fontWeight: 'bold' }}
+                  className="btn btn-outline"
+                  style={{ padding: '10px 14px', fontSize: 12, fontWeight: 'bold' }}
                   onClick={() => triggerDownload(selectedCharacterModal.referenceImage, `${selectedCharacterModal.name.replace(/[^a-zA-Z0-9]/g, '_')}_Portrait.png`)}
                 >
                   📥 Download PNG
@@ -4123,6 +4152,2105 @@ function CharactersStudio({ brands }: { brands: Row[] }) {
                   Close
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==========================================
+// Motion Studio: Genuine Local Character Animation
+// ==========================================
+function MotionStudio({
+  brands,
+  initialCharacterId,
+  onCreateVideo,
+  onGoToAssetLibrary,
+}: {
+  brands: Row[];
+  initialCharacterId?: number | null;
+  onCreateVideo?: (characterId: number, animationId: number) => void;
+  onGoToAssetLibrary?: () => void;
+}) {
+  const [selectedBrandId, setSelectedBrandId] = useState<number>(brands[0]?.id || 0);
+  const [characters, setCharacters] = useState<Row[]>([]);
+  const [selectedCharacter, setSelectedCharacter] = useState<any | null>(null);
+  const [presets, setPresets] = useState<any[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState<string>('wave');
+  const [durationSec, setDurationSec] = useState<number>(2.0);
+  const [movementNotes, setMovementNotes] = useState<string>('');
+  const [generating, setGenerating] = useState(false);
+  const [genStage, setGenStage] = useState<number>(0);
+  const [saving, setSaving] = useState(false);
+  const [progressMsg, setProgressMsg] = useState('');
+  const [statusAlert, setStatusAlert] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [previewResult, setPreviewResult] = useState<any | null>(null);
+  const [savedAnimations, setSavedAnimations] = useState<any[]>([]);
+  const [activeModalAnimation, setActiveModalAnimation] = useState<any | null>(null);
+  const [safeguardsModal, setSafeguardsModal] = useState(false);
+
+  useEffect(() => {
+    if (brands.length > 0 && !selectedBrandId) setSelectedBrandId(brands[0].id);
+  }, [brands]);
+
+  useEffect(() => {
+    api('GET', '/motion/presets').then((res) => {
+      if (Array.isArray(res)) setPresets(res);
+    }).catch(() => {});
+  }, []);
+
+  const loadData = () => {
+    if (!selectedBrandId) return;
+    api('GET', `/characters?brandId=${selectedBrandId}`).then((chars) => {
+      setCharacters(chars);
+      if (chars.length > 0) {
+        if (initialCharacterId) {
+          const matched = chars.find((c: any) => c.id === initialCharacterId);
+          if (matched) {
+            setSelectedCharacter(matched);
+            return;
+          }
+        }
+        setSelectedCharacter((prev: any) => (prev && chars.some((c: any) => c.id === prev.id) ? prev : chars[0]));
+      } else {
+        setSelectedCharacter(null);
+      }
+    }).catch(() => {});
+    api('GET', '/motion/animations').then((res) => {
+      if (res?.ok && Array.isArray(res.animations)) {
+        setSavedAnimations(res.animations);
+      }
+    }).catch(() => {});
+  };
+
+  useEffect(() => {
+    loadData();
+  }, [selectedBrandId]);
+
+  useEffect(() => {
+    if (initialCharacterId && characters.length > 0) {
+      const match = characters.find((c: any) => c.id === initialCharacterId);
+      if (match) setSelectedCharacter(match);
+    }
+  }, [initialCharacterId, characters]);
+
+  const handleGenerate = async () => {
+    if (!selectedCharacter) {
+      setStatusAlert({ type: 'error', text: 'Please select a character from your library first.' });
+      return;
+    }
+    setGenerating(true);
+    setGenStage(1);
+    setProgressMsg(`✨ Kinematic engine synthesizing articulated "${selectedPreset}" movement for ${selectedCharacter.name}...`);
+    setStatusAlert(null);
+    setPreviewResult(null);
+
+    const stageTimer1 = setTimeout(() => setGenStage(2), 600);
+    const stageTimer2 = setTimeout(() => setGenStage(3), 1800);
+    const stageTimer3 = setTimeout(() => setGenStage(4), 3200);
+
+    try {
+      const res = await api('POST', '/motion/generate', {
+        characterId: selectedCharacter.id,
+        preset: selectedPreset,
+        durationSec: Number(durationSec),
+        description: movementNotes.trim() || undefined,
+      });
+
+      clearTimeout(stageTimer1);
+      clearTimeout(stageTimer2);
+      clearTimeout(stageTimer3);
+      setGenStage(4);
+
+      if (res && res.ok && res.videoUrl) {
+        setPreviewResult(res);
+        setStatusAlert({
+          type: 'success',
+          text: `✅ Genuine animation generated! Mean frame difference: ${res.meanFrameDiff} (multiple distinct frames verified).`,
+        });
+      } else {
+        setStatusAlert({ type: 'error', text: res?.error || 'Generation failed without valid video output.' });
+      }
+    } catch (err: any) {
+      clearTimeout(stageTimer1);
+      clearTimeout(stageTimer2);
+      clearTimeout(stageTimer3);
+      setStatusAlert({ type: 'error', text: `Generation error: ${err.message}` });
+    } finally {
+      setGenerating(false);
+      setProgressMsg('');
+    }
+  };
+
+  const handleSaveAnimation = async () => {
+    if (!previewResult || !selectedCharacter) return;
+    setSaving(true);
+    try {
+      const res = await api('POST', '/motion/save', {
+        characterId: selectedCharacter.id,
+        title: `${selectedCharacter.name} - ${previewResult.preset.toUpperCase()} Motion`,
+        preset: previewResult.preset,
+        description: previewResult.description,
+        videoUrl: previewResult.videoUrl,
+        durationSec: previewResult.durationSec,
+        fps: previewResult.fps,
+        width: previewResult.width,
+        height: previewResult.height,
+        sha256: previewResult.sha256,
+        fileSize: previewResult.fileSize,
+        modelUsed: previewResult.modelUsed,
+        metadata: {
+          meanFrameDiff: previewResult.meanFrameDiff,
+          maxFrameDiff: previewResult.maxFrameDiff,
+          framesAnalyzed: previewResult.framesAnalyzed,
+        },
+      });
+
+      if (res && res.ok && res.animation) {
+        setSavedAnimations((prev) => [res.animation, ...prev]);
+        setPreviewResult((prev: any) => (prev ? { ...prev, savedId: res.animation.id } : null));
+        setStatusAlert({
+          type: 'success',
+          text: `💾 Animation successfully saved to library as ID #${res.animation.id}!`,
+        });
+      }
+    } catch (err: any) {
+      setStatusAlert({ type: 'error', text: `Failed to save animation: ${err.message}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteAnimation = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this animation record and video file?')) return;
+    try {
+      await api('DELETE', `/motion/animations/${id}`);
+      setSavedAnimations((prev) => prev.filter((a) => a.id !== id));
+      if (activeModalAnimation?.id === id) setActiveModalAnimation(null);
+      setStatusAlert({ type: 'info', text: `Deleted animation ID #${id}.` });
+    } catch (err: any) {
+      setStatusAlert({ type: 'error', text: `Delete failed: ${err.message}` });
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 1280, margin: '0 auto', paddingBottom: 60 }}>
+      {/* Header Banner */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 24,
+          padding: '24px 28px',
+          background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%)',
+          borderRadius: 16,
+          border: '1px solid rgba(245, 158, 11, 0.3)',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
+        }}
+      >
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+            <span style={{ fontSize: 28 }}>🎬</span>
+            <h2 style={{ margin: 0, fontSize: 24, color: '#f8fafc' }}>Motion Studio: Genuine Local Character Animation</h2>
+            <span
+              style={{
+                background: 'rgba(34, 197, 94, 0.2)',
+                color: '#4ade80',
+                padding: '2px 10px',
+                borderRadius: 20,
+                fontSize: 12,
+                fontWeight: 600,
+                border: '1px solid rgba(34, 197, 94, 0.4)',
+              }}
+            >
+              Sprint 2.1 Active
+            </span>
+          </div>
+          <p style={{ margin: 0, color: '#94a3b8', fontSize: 14 }}>
+            Synthesize genuine, multi-frame articulated character motion from saved character portraits using local PyTorch kinematic tensor sampling.
+          </p>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              background: 'rgba(245, 158, 11, 0.15)',
+              border: '1px solid rgba(245, 158, 11, 0.4)',
+              color: '#f59e0b',
+              padding: '6px 14px',
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+            onClick={() => setSafeguardsModal(true)}
+          >
+            <span>🛡️ Safeguards &amp; Ethics</span>
+            <span style={{ fontSize: 10, opacity: 0.8 }}>ⓘ</span>
+          </div>
+        </div>
+      </div>
+
+      {statusAlert && (
+        <div
+          style={{
+            marginBottom: 20,
+            padding: '12px 18px',
+            borderRadius: 8,
+            fontSize: 14,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background:
+              statusAlert.type === 'success'
+                ? 'rgba(34, 197, 94, 0.15)'
+                : statusAlert.type === 'error'
+                ? 'rgba(239, 68, 68, 0.15)'
+                : 'rgba(59, 130, 246, 0.15)',
+            border:
+              statusAlert.type === 'success'
+                ? '1px solid rgba(34, 197, 94, 0.4)'
+                : statusAlert.type === 'error'
+                ? '1px solid rgba(239, 68, 68, 0.4)'
+                : '1px solid rgba(59, 130, 246, 0.4)',
+            color:
+              statusAlert.type === 'success'
+                ? '#4ade80'
+                : statusAlert.type === 'error'
+                ? '#f87171'
+                : '#60a5fa',
+          }}
+        >
+          <span>{statusAlert.text}</span>
+          <button
+            type="button"
+            onClick={() => setStatusAlert(null)}
+            style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 16 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Main Studio Workspace: 2-Column Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 32 }}>
+        {/* Left Column: Animation Controls */}
+        <div
+          style={{
+            background: '#1e293b',
+            borderRadius: 16,
+            padding: 24,
+            border: '1px solid #334155',
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+          }}
+        >
+          {/* Brand & Character Selection */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 6, textTransform: 'uppercase' }}>
+              1. Brand &amp; Character Roster
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div>
+                <select
+                  value={selectedBrandId}
+                  onChange={(e) => setSelectedBrandId(Number(e.target.value))}
+                  style={{ width: '100%', padding: '10px 12px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8 }}
+                >
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <select
+                  value={selectedCharacter?.id || ''}
+                  onChange={(e) => {
+                    const ch = characters.find((c) => c.id === Number(e.target.value));
+                    setSelectedCharacter(ch || null);
+                  }}
+                  style={{ width: '100%', padding: '10px 12px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8 }}
+                >
+                  {characters.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {selectedCharacter && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 14,
+                  padding: 12,
+                  background: '#0f172a',
+                  borderRadius: 10,
+                  border: '1px solid #334155',
+                }}
+              >
+                {selectedCharacter.referenceImage ? (
+                  <img
+                    src={selectedCharacter.referenceImage}
+                    alt={selectedCharacter.name}
+                    style={{ width: 56, height: 56, borderRadius: '50%', objectFit: 'cover', border: '2px solid #f59e0b' }}
+                  />
+                ) : (
+                  <div style={{ width: 56, height: 56, borderRadius: '50%', background: '#334155', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>
+                    🎭
+                  </div>
+                )}
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 16 }}>{selectedCharacter.name}</div>
+                  <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                    {selectedCharacter.appearance || selectedCharacter.personality || 'Fictional Character Roster'}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                    Portrait: {selectedCharacter.referenceImage ? '✓ Saved Portrait Verified' : '⚠️ No Portrait Saved'}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Movement Preset Selection */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 8, textTransform: 'uppercase' }}>
+              2. Movement Preset
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+              {presets.map((preset) => {
+                const isSel = selectedPreset === preset.id;
+                return (
+                  <div
+                    key={preset.id}
+                    onClick={() => {
+                      setSelectedPreset(preset.id);
+                      if (preset.defaultDurationSec) setDurationSec(preset.defaultDurationSec);
+                    }}
+                    style={{
+                      padding: 12,
+                      borderRadius: 10,
+                      background: isSel ? 'rgba(245, 158, 11, 0.15)' : '#0f172a',
+                      border: isSel ? '2px solid #f59e0b' : '1px solid #334155',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span style={{ fontSize: 20 }}>{preset.iconEmoji || '🏃'}</span>
+                      <span style={{ fontWeight: 700, fontSize: 14, color: isSel ? '#f59e0b' : '#f8fafc' }}>
+                        {preset.name}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.3 }}>
+                      {preset.description}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Duration & Movement Notes */}
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <label style={{ fontSize: 12, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
+                3. Duration ({durationSec.toFixed(1)}s • 30 FPS)
+              </label>
+            </div>
+            <input
+              type="range"
+              min="1.0"
+              max="6.0"
+              step="0.5"
+              value={durationSec}
+              onChange={(e) => setDurationSec(parseFloat(e.target.value))}
+              style={{ width: '100%', marginBottom: 16 }}
+            />
+
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 6, textTransform: 'uppercase' }}>
+              Choreography Notes (Optional)
+            </label>
+            <textarea
+              rows={2}
+              placeholder="e.g. Expressive wave towards front camera with gentle shoulder cadence"
+              value={movementNotes}
+              onChange={(e) => setMovementNotes(e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 13, resize: 'none' }}
+            />
+          </div>
+
+          {/* Action Button */}
+          <button
+            type="button"
+            className="btn btn-gold"
+            disabled={generating || !selectedCharacter}
+            onClick={handleGenerate}
+            style={{
+              width: '100%',
+              padding: '14px 20px',
+              fontSize: 16,
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              opacity: generating || !selectedCharacter ? 0.6 : 1,
+            }}
+          >
+            {generating ? (
+              <>
+                <span className="spinner" />
+                <span>Generating Animation...</span>
+              </>
+            ) : (
+              <>
+                <span>✨</span>
+                <span>Generate Animation ({selectedPreset.toUpperCase()})</span>
+              </>
+            )}
+          </button>
+
+          {progressMsg && (
+            <div style={{ marginTop: 12, fontSize: 12, color: '#f59e0b', textAlign: 'center' }}>
+              {progressMsg}
+            </div>
+          )}
+        </div>
+
+        {/* Right Column: Live Animation Preview & Inspector */}
+        <div
+          style={{
+            background: '#1e293b',
+            borderRadius: 16,
+            padding: 24,
+            border: '1px solid #334155',
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <h3 style={{ margin: 0, fontSize: 16, color: '#f8fafc', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>👁️</span>
+              <span>Animation Preview</span>
+            </h3>
+            {previewResult && (
+              <span style={{ fontSize: 11, background: '#059669', color: '#fff', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>
+                {previewResult.width}x{previewResult.height} • {previewResult.fps} FPS
+              </span>
+            )}
+          </div>
+
+          <div
+            style={{
+              flex: 1,
+              minHeight: 380,
+              background: '#090d16',
+              borderRadius: 12,
+              border: '1px solid #334155',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+              position: 'relative',
+              marginBottom: 16,
+            }}
+          >
+            {generating ? (
+              <div style={{ padding: 24, width: '100%', maxWidth: 360 }}>
+                <div style={{ textAlign: 'center', marginBottom: 16 }}>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>⚡</div>
+                  <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 15 }}>Synthesizing Articulated Motion</div>
+                  <div style={{ fontSize: 12, color: '#f59e0b', marginTop: 4 }}>Local PyTorch Tensor Kinematics</div>
+                </div>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {[
+                    { step: 1, label: '1. Validating character portrait & kinematics' },
+                    { step: 2, label: '2. Local PyTorch tensor grid sampling' },
+                    { step: 3, label: '3. FFmpeg high-efficiency H.264 stream encoding' },
+                    { step: 4, label: '4. Frame difference & motion integrity check' },
+                  ].map((s) => (
+                    <div
+                      key={s.step}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        background: genStage > s.step ? 'rgba(34, 197, 94, 0.15)' : genStage === s.step ? 'rgba(245, 158, 11, 0.2)' : '#0f172a',
+                        border: genStage > s.step ? '1px solid rgba(34, 197, 94, 0.4)' : genStage === s.step ? '1px solid #f59e0b' : '1px solid #334155',
+                        color: genStage > s.step ? '#4ade80' : genStage === s.step ? '#f59e0b' : '#64748b',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{s.label}</span>
+                      <span>{genStage > s.step ? '✓ Done' : genStage === s.step ? '⏳ Working...' : '○ Pending'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : previewResult ? (
+              <video
+                key={previewResult.videoUrl}
+                src={previewResult.videoUrl}
+                controls
+                autoPlay
+                loop
+                playsInline
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: 460,
+                  borderRadius: 8,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.6)',
+                }}
+              />
+            ) : selectedCharacter?.referenceImage ? (
+              <div style={{ textAlign: 'center', padding: 24 }}>
+                <img
+                  src={selectedCharacter.referenceImage}
+                  alt={selectedCharacter.name}
+                  style={{
+                    maxHeight: 280,
+                    maxWidth: 240,
+                    borderRadius: 8,
+                    objectFit: 'contain',
+                    marginBottom: 12,
+                    boxShadow: '0 4px 16px rgba(0, 0, 0, 0.4)',
+                  }}
+                />
+                <div style={{ fontSize: 13, color: '#94a3b8' }}>
+                  Click &quot;Generate Animation&quot; to synthesize motion from this portrait
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', color: '#64748b', fontSize: 14 }}>
+                Select a character with a saved portrait to begin
+              </div>
+            )}
+          </div>
+
+          {previewResult && (
+            <div>
+              {/* Technical Metrics Card */}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(4, 1fr)',
+                  gap: 8,
+                  marginBottom: 16,
+                  padding: 12,
+                  background: '#0f172a',
+                  borderRadius: 10,
+                  border: '1px solid #334155',
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>MEAN FRAME DIFF</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: previewResult.meanFrameDiff > 0.005 ? '#4ade80' : '#f87171' }}>
+                    {previewResult.meanFrameDiff}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>MAX PEAK DIFF</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{previewResult.maxFrameDiff}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>DURATION</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{previewResult.durationSec}s</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>ENGINE RUNTIME</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{previewResult.runtimeSec}s</div>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', marginBottom: 14, wordBreak: 'break-all' }}>
+                SHA-256: {previewResult.sha256}
+              </div>
+
+              {/* Action Buttons */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn btn-gold"
+                  disabled={saving}
+                  onClick={handleSaveAnimation}
+                  style={{ padding: '10px 14px', fontSize: 13, fontWeight: 700 }}
+                >
+                  {saving ? 'Saving...' : '💾 Save to Library'}
+                </button>
+                <a
+                  href={previewResult.videoUrl}
+                  download={`motion_${previewResult.preset}_${selectedCharacter?.name || 'char'}.mp4`}
+                  className="btn"
+                  style={{
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    textAlign: 'center',
+                    background: '#334155',
+                    color: '#f8fafc',
+                    textDecoration: 'none',
+                    borderRadius: 8,
+                  }}
+                >
+                  ⬇️ Download MP4
+                </a>
+              </div>
+
+              {onCreateVideo && (
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    marginTop: 10,
+                    width: '100%',
+                    padding: '11px 16px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+                    color: '#ffffff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    borderRadius: 8,
+                  }}
+                  onClick={() => {
+                    const animId = previewResult.savedId || savedAnimations[0]?.id || 1;
+                    onCreateVideo(selectedCharacter.id, animId);
+                  }}
+                >
+                  📹 Compose Video from this Animation in Video Studio →
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Motion Studio Library (Persistent SQLite Records) */}
+      <div
+        style={{
+          background: '#1e293b',
+          borderRadius: 16,
+          padding: 24,
+          border: '1px solid #334155',
+          boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 20 }}>📚</span>
+            <h3 style={{ margin: 0, fontSize: 18, color: '#f8fafc' }}>
+              Motion Studio Library &amp; Saved Animations ({savedAnimations.length})
+            </h3>
+          </div>
+          <span style={{ fontSize: 12, color: '#94a3b8' }}>
+            Owner-Scoped Persistent SQLite Records
+          </span>
+        </div>
+
+        {savedAnimations.length === 0 ? (
+          <div style={{ padding: 32, textAlign: 'center', color: '#64748b', fontSize: 14, background: '#0f172a', borderRadius: 12 }}>
+            No saved animations in your library yet. Generate an animation and click &quot;Save to Character Library&quot; above.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 16 }}>
+            {savedAnimations.map((anim) => (
+              <div
+                key={anim.id}
+                style={{
+                  background: '#0f172a',
+                  borderRadius: 12,
+                  border: '1px solid #334155',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column',
+                }}
+              >
+                <div
+                  style={{
+                    height: 160,
+                    background: '#020617',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    position: 'relative',
+                  }}
+                  onClick={() => setActiveModalAnimation(anim)}
+                >
+                  <video
+                    src={anim.videoUrl}
+                    style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                    muted
+                    loop
+                    onMouseOver={(e) => (e.target as HTMLVideoElement).play().catch(() => {})}
+                    onMouseOut={(e) => (e.target as HTMLVideoElement).pause()}
+                  />
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 8,
+                      right: 8,
+                      background: 'rgba(15, 23, 42, 0.85)',
+                      color: '#f59e0b',
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      fontSize: 10,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {anim.preset?.toUpperCase()}
+                  </span>
+                </div>
+                <div style={{ padding: 14, flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 14, marginBottom: 4 }}>{anim.title}</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12 }}>
+                    ⏱ {anim.durationSec}s • {anim.width}x{anim.height} • {anim.fps} FPS
+                  </div>
+                  <div style={{ marginTop: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setActiveModalAnimation(anim)}
+                      style={{ flex: 1, padding: '6px 8px', fontSize: 11, background: '#334155', color: '#f8fafc', borderRadius: 6 }}
+                    >
+                      ▶ Play
+                    </button>
+                    {onCreateVideo && (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => onCreateVideo(anim.characterId, anim.id)}
+                        style={{ padding: '6px 8px', fontSize: 11, background: 'linear-gradient(135deg, #6366f1, #4f46e5)', color: '#ffffff', borderRadius: 6 }}
+                        title="Compose Video from this Animation"
+                      >
+                        📹 Video
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => handleDeleteAnimation(anim.id)}
+                      style={{ padding: '6px 8px', fontSize: 11, background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', borderRadius: 6 }}
+                    >
+                      🗑
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Animation Detail Modal */}
+      {activeModalAnimation && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 20,
+          }}
+          onClick={() => setActiveModalAnimation(null)}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              borderRadius: 16,
+              maxWidth: 640,
+              width: '100%',
+              padding: 24,
+              border: '1px solid #475569',
+              boxShadow: '0 12px 48px rgba(0, 0, 0, 0.8)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 18, color: '#f8fafc' }}>{activeModalAnimation.title}</h3>
+              <button
+                type="button"
+                onClick={() => setActiveModalAnimation(null)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ background: '#090d16', borderRadius: 12, overflow: 'hidden', marginBottom: 16, display: 'flex', justifyContent: 'center' }}>
+              <video
+                src={activeModalAnimation.videoUrl}
+                controls
+                autoPlay
+                loop
+                playsInline
+                style={{ maxHeight: 420, maxWidth: '100%' }}
+              />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, padding: 12, background: '#0f172a', borderRadius: 10, marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>PRESET</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f59e0b' }}>{activeModalAnimation.preset?.toUpperCase()}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>RESOLUTION</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{activeModalAnimation.width}x{activeModalAnimation.height}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>DURATION</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{activeModalAnimation.durationSec}s</div>
+              </div>
+            </div>
+            <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', marginBottom: 16, wordBreak: 'break-all' }}>
+              SHA-256: {activeModalAnimation.sha256}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
+              {onCreateVideo && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    const charId = activeModalAnimation.characterId;
+                    const animId = activeModalAnimation.id;
+                    setActiveModalAnimation(null);
+                    onCreateVideo(charId, animId);
+                  }}
+                  style={{
+                    padding: '8px 16px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+                    color: '#fff',
+                  }}
+                >
+                  📹 Compose in Video Studio →
+                </button>
+              )}
+              <a
+                href={activeModalAnimation.videoUrl}
+                download={`${activeModalAnimation.title.toLowerCase().replace(/[^a-z0-9]/g, '_')}.mp4`}
+                className="btn btn-gold"
+                style={{ textDecoration: 'none', padding: '8px 16px', fontSize: 13, fontWeight: 700 }}
+              >
+                ⬇️ Download MP4
+              </a>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setActiveModalAnimation(null)}
+                style={{ padding: '8px 16px', fontSize: 13, background: '#334155', color: '#f8fafc' }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Safeguards Modal */}
+      {safeguardsModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 20,
+          }}
+          onClick={() => setSafeguardsModal(false)}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              borderRadius: 16,
+              maxWidth: 580,
+              width: '100%',
+              padding: 24,
+              border: '1px solid #475569',
+              boxShadow: '0 12px 48px rgba(0, 0, 0, 0.8)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ margin: '0 0 12px 0', fontSize: 18, color: '#f8fafc' }}>
+              🛡️ Motion &amp; Likeness Ethical Safeguards
+            </h3>
+            <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.6, marginBottom: 20 }}>
+              Auravo Studio enforces strict ethical principles for character animation:
+              <ul style={{ margin: '8px 0', paddingLeft: 20, color: '#94a3b8' }}>
+                <li><b>Explicit Rights &amp; Consent:</b> Cryptographically verified performer consent records.</li>
+                <li><b>Pose-Appearance Separation:</b> Pure skeletal keypoint extraction with zero identity, facial, or attire leakage.</li>
+                <li><b>Non-Consensual Likeness Prevention:</b> Strict prohibition on animating unverified or real individuals.</li>
+              </ul>
+              For this sprint, Motion Studio operates exclusively with local kinematic movement presets on saved fictional characters.
+            </div>
+            <button
+              type="button"
+              className="btn btn-gold"
+              style={{ fontSize: 12, alignSelf: 'flex-end' }}
+              onClick={() => setSafeguardsModal(false)}
+            >
+              Understood
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==========================================
+// Video Studio: End-to-End Character Video Creation
+// ==========================================
+function VideoStudio({
+  brands,
+  initialCharacterId,
+  initialAnimationId,
+  onGoToAssetLibrary,
+  onAnimateMore,
+}: {
+  brands: Row[];
+  initialCharacterId?: number | null;
+  initialAnimationId?: number | null;
+  onGoToAssetLibrary?: () => void;
+  onAnimateMore?: (characterId: number) => void;
+}) {
+  const [selectedBrandId, setSelectedBrandId] = useState<number>(brands[0]?.id || 0);
+  const [characters, setCharacters] = useState<Row[]>([]);
+  const [selectedCharacter, setSelectedCharacter] = useState<any | null>(null);
+  const [animations, setAnimations] = useState<any[]>([]);
+  const [selectedAnimation, setSelectedAnimation] = useState<any | null>(null);
+  const [aspectRatios, setAspectRatios] = useState<any[]>([]);
+  const [canvasStyles, setCanvasStyles] = useState<any[]>([]);
+  const [selectedAspectRatio, setSelectedAspectRatio] = useState<string>('9:16');
+  const [selectedCanvasStyle, setSelectedCanvasStyle] = useState<string>('stage_matte');
+  const [videoTitle, setVideoTitle] = useState<string>('');
+  const [titleOverlay, setTitleOverlay] = useState<string>('');
+  const [subtitleText, setSubtitleText] = useState<string>('');
+  const [showBadge, setShowBadge] = useState<boolean>(true);
+  const [narrationText, setNarrationText] = useState<string>('');
+  const [narrationVoice, setNarrationVoice] = useState<string>('Samantha');
+  const [bgmTrack, setBgmTrack] = useState<string>('auravo_ambient_lounge');
+  const [voiceVolume, setVoiceVolume] = useState<number>(1.1);
+  const [bgmVolume, setBgmVolume] = useState<number>(0.25);
+  const [composing, setComposing] = useState(false);
+  const [composeStage, setComposeStage] = useState<number>(0);
+  const [saving, setSaving] = useState(false);
+  const [progressMsg, setProgressMsg] = useState('');
+  const [statusAlert, setStatusAlert] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [previewResult, setPreviewResult] = useState<any | null>(null);
+  const [savedVideos, setSavedVideos] = useState<any[]>([]);
+  const [activeModalVideo, setActiveModalVideo] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (brands.length > 0 && !selectedBrandId) setSelectedBrandId(brands[0].id);
+  }, [brands]);
+
+  useEffect(() => {
+    api('GET', '/videos/presets').then((res) => {
+      if (res?.aspectRatios) setAspectRatios(res.aspectRatios);
+      if (res?.canvasStyles) setCanvasStyles(res.canvasStyles);
+    }).catch(() => {});
+  }, []);
+
+  const loadData = () => {
+    if (!selectedBrandId) return;
+    api('GET', `/characters?brandId=${selectedBrandId}`).then((chars) => {
+      setCharacters(chars);
+      if (chars.length > 0) {
+        if (initialCharacterId) {
+          const matched = chars.find((c: any) => c.id === initialCharacterId);
+          if (matched) {
+            setSelectedCharacter(matched);
+            return;
+          }
+        }
+        setSelectedCharacter((prev: any) => (prev && chars.some((c: any) => c.id === prev.id) ? prev : chars[0]));
+      } else {
+        setSelectedCharacter(null);
+      }
+    }).catch(() => {});
+    api('GET', '/videos').then((res) => {
+      if (res?.ok && Array.isArray(res.videos)) {
+        setSavedVideos(res.videos);
+      }
+    }).catch(() => {});
+  };
+
+  useEffect(() => {
+    loadData();
+  }, [selectedBrandId]);
+
+  useEffect(() => {
+    if (initialCharacterId && characters.length > 0) {
+      const match = characters.find((c: any) => c.id === initialCharacterId);
+      if (match) setSelectedCharacter(match);
+    }
+  }, [initialCharacterId, characters]);
+
+  useEffect(() => {
+    if (selectedCharacter?.id) {
+      api('GET', `/videos/animations/${selectedCharacter.id}`).then((res) => {
+        if (res?.ok && Array.isArray(res.animations)) {
+          setAnimations(res.animations);
+          if (res.animations.length > 0) {
+            if (initialAnimationId) {
+              const matchedAnim = res.animations.find((a: any) => a.id === initialAnimationId);
+              if (matchedAnim) {
+                setSelectedAnimation(matchedAnim);
+                if (!videoTitle) {
+                  setVideoTitle(`${selectedCharacter.name} - ${matchedAnim.preset?.toUpperCase() || 'Stage'} Video`);
+                }
+                return;
+              }
+            }
+            setSelectedAnimation(res.animations[0]);
+            if (!videoTitle) {
+              setVideoTitle(`${selectedCharacter.name} - ${res.animations[0].preset?.toUpperCase() || 'Stage'} Video`);
+            }
+          } else {
+            setSelectedAnimation(null);
+          }
+        }
+      }).catch(() => {
+        setAnimations([]);
+        setSelectedAnimation(null);
+      });
+    } else {
+      setAnimations([]);
+      setSelectedAnimation(null);
+    }
+  }, [selectedCharacter, initialAnimationId]);
+
+  const handleCompose = async () => {
+    if (!selectedCharacter) {
+      setStatusAlert({ type: 'error', text: 'Please select a character from your library first.' });
+      return;
+    }
+    if (!selectedAnimation) {
+      setStatusAlert({ type: 'error', text: 'Please select a saved animation from Motion Studio first.' });
+      return;
+    }
+
+    setComposing(true);
+    setComposeStage(1);
+    setProgressMsg(`🎬 Local FFmpeg composing ${selectedAspectRatio} video for "${selectedCharacter.name}" with ${selectedCanvasStyle} canvas...`);
+    setStatusAlert(null);
+    setPreviewResult(null);
+
+    const t1 = setTimeout(() => setComposeStage(2), 600);
+    const t2 = setTimeout(() => setComposeStage(3), 1500);
+    const t3 = setTimeout(() => setComposeStage(4), 2600);
+    const t4 = setTimeout(() => setComposeStage(5), 3800);
+
+    try {
+      const finalTitle = videoTitle.trim() || `${selectedCharacter.name}: Royal Stage Performance`;
+      const res = await api('POST', '/videos/compose', {
+        characterId: selectedCharacter.id,
+        animationId: selectedAnimation.id,
+        title: finalTitle,
+        aspectRatio: selectedAspectRatio,
+        canvasStyle: selectedCanvasStyle,
+        titleOverlay: titleOverlay.trim() || undefined,
+        subtitleText: subtitleText.trim() || undefined,
+        characterBadge: showBadge,
+        narrationText: narrationText.trim() || undefined,
+        narrationVoice,
+        bgmTrack,
+        voiceVolume: Number(voiceVolume),
+        bgmVolume: Number(bgmVolume),
+      });
+
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      clearTimeout(t4);
+      setComposeStage(5);
+
+      if (res && res.ok && res.result?.videoUrl) {
+        setPreviewResult(res.result);
+        setStatusAlert({
+          type: 'success',
+          text: `✅ Composed video ready! Resolution: ${res.result.resolution}, Duration: ${res.result.durationSec}s, SHA-256 verified.`,
+        });
+      } else {
+        setStatusAlert({ type: 'error', text: res?.error || 'Composition failed without valid output.' });
+      }
+    } catch (err: any) {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      clearTimeout(t4);
+      setStatusAlert({ type: 'error', text: `Composition error: ${err.message}` });
+    } finally {
+      setComposing(false);
+      setProgressMsg('');
+    }
+  };
+
+  const handleSaveVideo = async () => {
+    if (!previewResult || !selectedCharacter || !selectedAnimation) return;
+    setSaving(true);
+    try {
+      const res = await api('POST', '/videos/save', {
+        characterId: selectedCharacter.id,
+        animationId: selectedAnimation.id,
+        title: videoTitle.trim() || `${selectedCharacter.name} Video`,
+        aspectRatio: previewResult.aspectRatio,
+        resolution: previewResult.resolution,
+        width: previewResult.width,
+        height: previewResult.height,
+        durationSec: previewResult.durationSec,
+        fps: previewResult.fps,
+        videoUrl: previewResult.videoUrl,
+        thumbnailUrl: previewResult.thumbnailUrl,
+        sha256: previewResult.sha256,
+        fileSize: previewResult.fileSize,
+        compositionConfig: previewResult.compositionConfig,
+        audioConfig: previewResult.audioConfig,
+        subtitleConfig: previewResult.subtitleConfig,
+      });
+
+      if (res && res.ok && res.video) {
+        setSavedVideos((prev) => [res.video, ...prev]);
+        setPreviewResult((prev: any) => (prev ? { ...prev, savedId: res.video.id } : null));
+        setStatusAlert({
+          type: 'success',
+          text: `💾 Video successfully saved to library as ID #${res.video.id}!`,
+        });
+      }
+    } catch (err: any) {
+      setStatusAlert({ type: 'error', text: `Failed to save video: ${err.message}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteVideo = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this composed video record and asset?')) return;
+    try {
+      await api('DELETE', `/videos/${id}`);
+      setSavedVideos((prev) => prev.filter((v) => v.id !== id));
+      if (activeModalVideo?.id === id) setActiveModalVideo(null);
+      setStatusAlert({ type: 'info', text: `Deleted video ID #${id}.` });
+    } catch (err: any) {
+      setStatusAlert({ type: 'error', text: `Delete failed: ${err.message}` });
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 1280, margin: '0 auto', paddingBottom: 60 }}>
+      {/* Header Banner */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 24,
+          padding: '24px 28px',
+          background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%)',
+          borderRadius: 16,
+          border: '1px solid rgba(245, 158, 11, 0.3)',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
+        }}
+      >
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+            <span style={{ fontSize: 28 }}>📹</span>
+            <h2 style={{ margin: 0, fontSize: 24, color: '#f8fafc' }}>Video Studio: End-to-End Character Video Creation</h2>
+            <span
+              style={{
+                background: 'rgba(34, 197, 94, 0.2)',
+                color: '#4ade80',
+                padding: '2px 10px',
+                borderRadius: 20,
+                fontSize: 12,
+                fontWeight: 600,
+                border: '1px solid rgba(34, 197, 94, 0.4)',
+              }}
+            >
+              Sprint 3 Active
+            </span>
+          </div>
+          <p style={{ margin: 0, color: '#94a3b8', fontSize: 14 }}>
+            Compose saved character animations into multi-aspect MP4 videos with canvas styling, typography overlays, subtitles, and synchronized audio.
+          </p>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              background: 'rgba(245, 158, 11, 0.15)',
+              border: '1px solid rgba(245, 158, 11, 0.4)',
+              color: '#f59e0b',
+              padding: '6px 14px',
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 700,
+            }}
+          >
+            <span>⚡ Local FFmpeg &amp; TTS Engine</span>
+            <span>•</span>
+            <span>₹0.00 / $0.00 Cost</span>
+          </div>
+        </div>
+      </div>
+
+      {statusAlert && (
+        <div
+          style={{
+            marginBottom: 20,
+            padding: '12px 18px',
+            borderRadius: 8,
+            fontSize: 14,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background:
+              statusAlert.type === 'success'
+                ? 'rgba(34, 197, 94, 0.15)'
+                : statusAlert.type === 'error'
+                ? 'rgba(239, 68, 68, 0.15)'
+                : 'rgba(59, 130, 246, 0.15)',
+            border:
+              statusAlert.type === 'success'
+                ? '1px solid rgba(34, 197, 94, 0.4)'
+                : statusAlert.type === 'error'
+                ? '1px solid rgba(239, 68, 68, 0.4)'
+                : '1px solid rgba(59, 130, 246, 0.4)',
+            color:
+              statusAlert.type === 'success'
+                ? '#4ade80'
+                : statusAlert.type === 'error'
+                ? '#f87171'
+                : '#60a5fa',
+          }}
+        >
+          <span>{statusAlert.text}</span>
+          <button
+            type="button"
+            onClick={() => setStatusAlert(null)}
+            style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 16 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Main Studio Workspace: 2-Column Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 32 }}>
+        {/* Left Column: Composition Controls */}
+        <div
+          style={{
+            background: '#1e293b',
+            borderRadius: 16,
+            padding: 24,
+            border: '1px solid #334155',
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+          }}
+        >
+          {/* Brand & Character Selection */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 6, textTransform: 'uppercase' }}>
+              1. Brand &amp; Character Roster
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div>
+                <select
+                  value={selectedBrandId}
+                  onChange={(e) => setSelectedBrandId(Number(e.target.value))}
+                  style={{ width: '100%', padding: '10px 12px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8 }}
+                >
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <select
+                  value={selectedCharacter?.id || ''}
+                  onChange={(e) => {
+                    const ch = characters.find((c) => c.id === Number(e.target.value));
+                    setSelectedCharacter(ch || null);
+                  }}
+                  style={{ width: '100%', padding: '10px 12px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8 }}
+                >
+                  {characters.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {selectedCharacter && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 14,
+                  padding: 12,
+                  background: '#0f172a',
+                  borderRadius: 10,
+                  border: '1px solid #334155',
+                }}
+              >
+                {selectedCharacter.referenceImage ? (
+                  <img
+                    src={selectedCharacter.referenceImage}
+                    alt={selectedCharacter.name}
+                    style={{ width: 48, height: 48, borderRadius: '50%', objectFit: 'cover', border: '2px solid #f59e0b' }}
+                  />
+                ) : (
+                  <div style={{ width: 48, height: 48, borderRadius: '50%', background: '#334155', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>
+                    🎭
+                  </div>
+                )}
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 15 }}>{selectedCharacter.name}</div>
+                  <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                    {selectedCharacter.appearance || selectedCharacter.personality || 'Active Character Roster'}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Source Animation Selection */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <label style={{ fontSize: 12, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
+                2. Select Motion Studio Animation ({animations.length})
+              </label>
+              <span style={{ fontSize: 11, color: '#f59e0b' }}>Motion Studio ➔ Video Studio Pipeline</span>
+            </div>
+
+            {animations.length === 0 ? (
+              <div
+                style={{
+                  padding: 16,
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  borderRadius: 8,
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#fca5a5',
+                  fontSize: 13,
+                  textAlign: 'center',
+                }}
+              >
+                No saved animations found for {selectedCharacter?.name || 'this character'}.<br />
+                Please open the <b>Motion Studio</b> tab to synthesize and save a kinematic animation first!
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10 }}>
+                {animations.map((anim) => {
+                  const isSel = selectedAnimation?.id === anim.id;
+                  return (
+                    <div
+                      key={anim.id}
+                      onClick={() => setSelectedAnimation(anim)}
+                      style={{
+                        padding: 10,
+                        borderRadius: 8,
+                        background: isSel ? 'rgba(245, 158, 11, 0.2)' : '#0f172a',
+                        border: isSel ? '2px solid #f59e0b' : '1px solid #334155',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease',
+                      }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 700, color: isSel ? '#f59e0b' : '#f8fafc', marginBottom: 2 }}>
+                        {anim.preset?.toUpperCase() || 'ANIM'}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                        ⏱ {anim.durationSec}s • {anim.width}x{anim.height}
+                      </div>
+                      <div style={{ fontSize: 10, color: '#64748b', marginTop: 4 }}>
+                        ID #{anim.id}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Aspect Ratio & Canvas Framing */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 8, textTransform: 'uppercase' }}>
+              3. Composition &amp; Aspect Ratio
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
+              {(aspectRatios.length > 0 ? aspectRatios : [
+                { id: '9:16', label: '9:16 Vertical', description: 'Reels / Shorts / TikTok' },
+                { id: '16:9', label: '16:9 Landscape', description: 'YouTube / Desktop' },
+                { id: '1:1', label: '1:1 Square', description: 'Feed & Carousel' },
+              ]).map((ar: any) => {
+                const isSel = selectedAspectRatio === ar.id;
+                return (
+                  <button
+                    key={ar.id}
+                    type="button"
+                    onClick={() => setSelectedAspectRatio(ar.id)}
+                    style={{
+                      padding: '10px 8px',
+                      borderRadius: 8,
+                      background: isSel ? '#f59e0b' : '#0f172a',
+                      color: isSel ? '#000' : '#f8fafc',
+                      border: isSel ? '2px solid #d97706' : '1px solid #334155',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      textAlign: 'center',
+                    }}
+                  >
+                    <div>{ar.label}</div>
+                    <div style={{ fontSize: 10, fontWeight: 400, opacity: 0.85, marginTop: 2 }}>{ar.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>Canvas Stage Style:</label>
+                <select
+                  value={selectedCanvasStyle}
+                  onChange={(e) => setSelectedCanvasStyle(e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+                >
+                  <option value="stage_matte">Stage Matte (Deep Slate #0f172a)</option>
+                  <option value="blurred_backdrop">Blurred Character Backdrop</option>
+                  <option value="cinematic_letterbox">Cinematic Letterbox (Black)</option>
+                  <option value="full_bleed">Full Bleed (Cropped Fit)</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>Video Project Title:</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Aria Dev Stage Performance"
+                  value={videoTitle}
+                  onChange={(e) => setVideoTitle(e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Typography & Overlays */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 8, textTransform: 'uppercase' }}>
+              4. Typography &amp; Subtitle Overlays
+            </label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8 }}>
+              <div>
+                <input
+                  type="text"
+                  placeholder="Opening Title Overlay (e.g. Aria Dev: Royal Stage Wave)"
+                  value={titleOverlay}
+                  onChange={(e) => setTitleOverlay(e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+                />
+              </div>
+              <div>
+                <input
+                  type="text"
+                  placeholder="Descriptive Subtitle (e.g. Aria greets the audience with poise and grace.)"
+                  value={subtitleText}
+                  onChange={(e) => setSubtitleText(e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+                />
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#cbd5e1', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={showBadge}
+                  onChange={(e) => setShowBadge(e.target.checked)}
+                />
+                Include Character Branding Watermark Badge
+              </label>
+            </div>
+          </div>
+
+          {/* Audio & Narration */}
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#94a3b8', marginBottom: 8, textTransform: 'uppercase' }}>
+              5. Audio &amp; Narration (Local TTS)
+            </label>
+            <textarea
+              rows={2}
+              placeholder="Spoken narration text (synthesized via local TTS macOS say / FFmpeg)"
+              value={narrationText}
+              onChange={(e) => setNarrationText(e.target.value)}
+              style={{ width: '100%', padding: '8px 10px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12, resize: 'none', marginBottom: 8 }}
+            />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 2 }}>Voice:</label>
+                <select
+                  value={narrationVoice}
+                  onChange={(e) => setNarrationVoice(e.target.value)}
+                  style={{ width: '100%', padding: '6px 8px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+                >
+                  <option value="Samantha">Samantha (English Female)</option>
+                  <option value="Alex">Alex (English Male)</option>
+                  <option value="Victoria">Victoria (English Warm)</option>
+                  <option value="Lekha">Lekha (Hindi / Bilingual)</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 11, color: '#94a3b8', marginBottom: 2 }}>BGM Music Track:</label>
+                <select
+                  value={bgmTrack}
+                  onChange={(e) => setBgmTrack(e.target.value)}
+                  style={{ width: '100%', padding: '6px 8px', background: '#0f172a', color: '#f8fafc', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+                >
+                  <option value="auravo_ambient_lounge">Auravo Ambient Lounge (432Hz Synth)</option>
+                  <option value="none">No Background Music (Narration / Silent)</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 10, color: '#94a3b8' }}>Voice Volume ({voiceVolume}x):</label>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="2.0"
+                  step="0.1"
+                  value={voiceVolume}
+                  onChange={(e) => setVoiceVolume(parseFloat(e.target.value))}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 10, color: '#94a3b8' }}>BGM Volume ({bgmVolume}x):</label>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="1.0"
+                  step="0.05"
+                  value={bgmVolume}
+                  onChange={(e) => setBgmVolume(parseFloat(e.target.value))}
+                  style={{ width: '100%' }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Action Button */}
+          <button
+            type="button"
+            className="btn btn-gold"
+            disabled={composing || !selectedCharacter || !selectedAnimation}
+            onClick={handleCompose}
+            style={{
+              width: '100%',
+              padding: '14px 20px',
+              fontSize: 16,
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              opacity: composing || !selectedCharacter || !selectedAnimation ? 0.6 : 1,
+            }}
+          >
+            {composing ? (
+              <>
+                <span className="spinner" />
+                <span>Composing Video via FFmpeg...</span>
+              </>
+            ) : (
+              <>
+                <span>🎬</span>
+                <span>Compose Video ({selectedAspectRatio})</span>
+              </>
+            )}
+          </button>
+
+          {progressMsg && (
+            <div style={{ marginTop: 12, fontSize: 12, color: '#f59e0b', textAlign: 'center' }}>
+              {progressMsg}
+            </div>
+          )}
+        </div>
+
+        {/* Right Column: Live Preview & Verification */}
+        <div
+          style={{
+            background: '#1e293b',
+            borderRadius: 16,
+            padding: 24,
+            border: '1px solid #334155',
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <h3 style={{ margin: 0, fontSize: 16, color: '#f8fafc', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>👁️</span>
+              <span>Composed Video Preview</span>
+            </h3>
+            {previewResult && (
+              <span style={{ fontSize: 11, background: '#059669', color: '#fff', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>
+                {previewResult.resolution} • {previewResult.fps} FPS
+              </span>
+            )}
+          </div>
+
+          <div
+            style={{
+              flex: 1,
+              minHeight: 380,
+              background: '#090d16',
+              borderRadius: 12,
+              border: '1px solid #334155',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+              position: 'relative',
+              marginBottom: 16,
+            }}
+          >
+            {composing ? (
+              <div style={{ padding: 24, width: '100%', maxWidth: 360 }}>
+                <div style={{ textAlign: 'center', marginBottom: 16 }}>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>🎞️</div>
+                  <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 15 }}>Composing Broadcast Video</div>
+                  <div style={{ fontSize: 12, color: '#f59e0b', marginTop: 4 }}>FFmpeg Multi-Layer Synthesis Pipeline</div>
+                </div>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {[
+                    { step: 1, label: '1. Resolving animation source & canvas framing' },
+                    { step: 2, label: '2. Synthesizing voice narration & stereo audio mix' },
+                    { step: 3, label: '3. Rendering dynamic badges & subtitle overlays' },
+                    { step: 4, label: '4. Executing FFmpeg broadcast composition pipeline' },
+                    { step: 5, label: '5. Generating contact sheet & preview thumbnail' },
+                  ].map((s) => (
+                    <div
+                      key={s.step}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        fontSize: 12,
+                        background: composeStage > s.step ? 'rgba(34, 197, 94, 0.15)' : composeStage === s.step ? 'rgba(245, 158, 11, 0.2)' : '#0f172a',
+                        border: composeStage > s.step ? '1px solid rgba(34, 197, 94, 0.4)' : composeStage === s.step ? '1px solid #f59e0b' : '1px solid #334155',
+                        color: composeStage > s.step ? '#4ade80' : composeStage === s.step ? '#f59e0b' : '#64748b',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{s.label}</span>
+                      <span>{composeStage > s.step ? '✓ Done' : composeStage === s.step ? '⏳ Working...' : '○ Pending'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : previewResult ? (
+              <video
+                key={previewResult.videoUrl}
+                src={previewResult.videoUrl}
+                controls
+                autoPlay
+                loop
+                playsInline
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: 460,
+                  borderRadius: 8,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.6)',
+                }}
+              />
+            ) : selectedAnimation ? (
+              <div style={{ textAlign: 'center', padding: 24 }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>🎞️</div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: '#e2e8f0', marginBottom: 6 }}>
+                  Source Animation Ready: {selectedAnimation.title || selectedAnimation.preset}
+                </div>
+                <div style={{ fontSize: 12, color: '#94a3b8', maxWidth: 320, margin: '0 auto' }}>
+                  Click &quot;Compose Video&quot; to apply canvas framing, typography badges, and synchronized audio narration.
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', color: '#64748b', fontSize: 14 }}>
+                Select a character and animation to preview composition
+              </div>
+            )}
+          </div>
+
+          {previewResult && (
+            <div>
+              {/* Technical Badges */}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(4, 1fr)',
+                  gap: 8,
+                  marginBottom: 16,
+                  padding: 12,
+                  background: '#0f172a',
+                  borderRadius: 10,
+                  border: '1px solid #334155',
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>DURATION</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{previewResult.durationSec}s</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>FILE SIZE</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{Math.round(previewResult.fileSize / 1024)} KB</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>AUDIO</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: previewResult.audioConfig?.hasAudio ? '#4ade80' : '#94a3b8' }}>
+                    {previewResult.audioConfig?.hasAudio ? 'AAC Stereo' : 'Silent'}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#94a3b8' }}>RENDER TIME</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{previewResult.renderStats?.renderTimeMs || 0}ms</div>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', marginBottom: 14, wordBreak: 'break-all' }}>
+                SHA-256: {previewResult.sha256}
+              </div>
+
+              {/* Action Buttons */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn btn-gold"
+                  disabled={saving}
+                  onClick={handleSaveVideo}
+                  style={{ padding: '10px 14px', fontSize: 13, fontWeight: 700 }}
+                >
+                  {saving ? 'Saving...' : '💾 Save to Video Library'}
+                </button>
+                <a
+                  href={previewResult.videoUrl}
+                  download={`auravo_${previewResult.aspectRatio.replace(':', '_')}_video.mp4`}
+                  className="btn"
+                  style={{
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    textAlign: 'center',
+                    background: '#334155',
+                    color: '#f8fafc',
+                    textDecoration: 'none',
+                    borderRadius: 8,
+                  }}
+                >
+                  ⬇️ Download MP4
+                </a>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+                {onGoToAssetLibrary && (
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={onGoToAssetLibrary}
+                    style={{ padding: '10px 14px', fontSize: 12, borderColor: '#38bdf8', color: '#38bdf8', fontWeight: 700 }}
+                  >
+                    🗄️ View in Asset Library
+                  </button>
+                )}
+                {onAnimateMore && selectedCharacter && (
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={() => onAnimateMore(selectedCharacter.id)}
+                    style={{ padding: '10px 14px', fontSize: 12, borderColor: '#f59e0b', color: '#f59e0b', fontWeight: 700 }}
+                  >
+                    🎬 Animate Another Motion
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Video Studio Library (Persistent SQLite Records) */}
+      <div
+        style={{
+          background: '#1e293b',
+          borderRadius: 16,
+          padding: 24,
+          border: '1px solid #334155',
+          boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 20 }}>📚</span>
+            <h3 style={{ margin: 0, fontSize: 18, color: '#f8fafc' }}>
+              Video Studio Library &amp; Saved Compositions ({savedVideos.length})
+            </h3>
+          </div>
+          <span style={{ fontSize: 12, color: '#94a3b8' }}>
+            Owner-Scoped Persistent SQLite Records (character_videos)
+          </span>
+        </div>
+
+        {savedVideos.length === 0 ? (
+          <div style={{ padding: 32, textAlign: 'center', color: '#64748b', fontSize: 14, background: '#0f172a', borderRadius: 12 }}>
+            No saved videos yet. Compose and save your first video above!
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
+            {savedVideos.map((v) => (
+              <div
+                key={v.id}
+                style={{
+                  background: '#0f172a',
+                  borderRadius: 12,
+                  border: '1px solid #334155',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column',
+                }}
+              >
+                <div
+                  style={{
+                    height: 180,
+                    background: '#020617',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    position: 'relative',
+                  }}
+                  onClick={() => setActiveModalVideo(v)}
+                >
+                  {v.thumbnailUrl ? (
+                    <img src={v.thumbnailUrl} alt={v.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    <span style={{ fontSize: 40 }}>📹</span>
+                  )}
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 8,
+                      left: 8,
+                      background: 'rgba(15, 23, 42, 0.85)',
+                      color: '#f59e0b',
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      fontSize: 11,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {v.aspectRatio}
+                  </span>
+                  <span
+                    style={{
+                      position: 'absolute',
+                      bottom: 8,
+                      right: 8,
+                      background: 'rgba(15, 23, 42, 0.85)',
+                      color: '#fff',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      fontSize: 10,
+                    }}
+                  >
+                    ⏱ {v.durationSec}s
+                  </span>
+                </div>
+                <div style={{ padding: 14, flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 14, marginBottom: 4 }}>{v.title}</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12 }}>
+                    {v.resolution} • {Math.round((v.fileSize || 0) / 1024)} KB • ID #{v.id}
+                  </div>
+                  <div style={{ marginTop: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => setActiveModalVideo(v)}
+                      style={{ flex: 1, padding: '6px 8px', fontSize: 11, background: '#334155', color: '#f8fafc', borderRadius: 6 }}
+                    >
+                      ▶ Play
+                    </button>
+                    {onGoToAssetLibrary && (
+                      <button
+                        type="button"
+                        className="btn btn-outline"
+                        onClick={onGoToAssetLibrary}
+                        style={{ padding: '6px 8px', fontSize: 11, borderColor: '#38bdf8', color: '#38bdf8', borderRadius: 6 }}
+                        title="View in Asset Library"
+                      >
+                        🗄️
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => handleDeleteVideo(v.id)}
+                      style={{ padding: '6px 8px', fontSize: 11, background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', borderRadius: 6 }}
+                    >
+                      🗑
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Video Detail Modal */}
+      {activeModalVideo && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 20,
+          }}
+          onClick={() => setActiveModalVideo(null)}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              borderRadius: 16,
+              maxWidth: 720,
+              width: '100%',
+              padding: 24,
+              border: '1px solid #475569',
+              boxShadow: '0 12px 48px rgba(0, 0, 0, 0.8)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 18, color: '#f8fafc' }}>{activeModalVideo.title}</h3>
+              <button
+                type="button"
+                onClick={() => setActiveModalVideo(null)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ background: '#090d16', borderRadius: 12, overflow: 'hidden', marginBottom: 16, display: 'flex', justifyContent: 'center' }}>
+              <video
+                src={activeModalVideo.videoUrl}
+                controls
+                autoPlay
+                playsInline
+                style={{ maxHeight: 420, maxWidth: '100%' }}
+              />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: 12, background: '#0f172a', borderRadius: 10, marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>ASPECT RATIO</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{activeModalVideo.aspectRatio}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>RESOLUTION</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{activeModalVideo.resolution}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>DURATION</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{activeModalVideo.durationSec}s</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>FILE SIZE</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#f8fafc' }}>{Math.round((activeModalVideo.fileSize || 0) / 1024)} KB</div>
+              </div>
+            </div>
+            <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', marginBottom: 16, wordBreak: 'break-all' }}>
+              SHA-256: {activeModalVideo.sha256}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
+              {onGoToAssetLibrary && (
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => {
+                    setActiveModalVideo(null);
+                    onGoToAssetLibrary();
+                  }}
+                  style={{ padding: '8px 16px', fontSize: 13, borderColor: '#38bdf8', color: '#38bdf8' }}
+                >
+                  🗄️ View in Asset Library
+                </button>
+              )}
+              {onAnimateMore && selectedCharacter && (
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => {
+                    const charId = selectedCharacter.id;
+                    setActiveModalVideo(null);
+                    onAnimateMore(charId);
+                  }}
+                  style={{ padding: '8px 16px', fontSize: 13, borderColor: '#f59e0b', color: '#f59e0b' }}
+                >
+                  🎬 Animate Another Motion
+                </button>
+              )}
+              <a
+                href={activeModalVideo.videoUrl}
+                download={`${activeModalVideo.title.toLowerCase().replace(/[^a-z0-9]/g, '_')}.mp4`}
+                className="btn btn-gold"
+                style={{ textDecoration: 'none', padding: '8px 16px', fontSize: 13, fontWeight: 700 }}
+              >
+                ⬇️ Download MP4
+              </a>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setActiveModalVideo(null)}
+                style={{ padding: '8px 16px', fontSize: 13, background: '#334155', color: '#f8fafc' }}
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -4544,10 +6672,36 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function App() {
   const [user, setUser] = useState<Row | null | undefined>(undefined);
-  const [tab, setTab] = useState('Generation Monitor');
+  const [tab, setTab] = useState('Dashboard');
+  const [activeCharacterId, setActiveCharacterId] = useState<number | null>(null);
+  const [activeAnimationId, setActiveAnimationId] = useState<number | null>(null);
   const [brands, setBrands] = useState<Row[]>([]);
   const [experimentsData, setExperimentsData] = useState<ExperimentsPayload | null>(null);
   const [selectedExperiment, setSelectedExperiment] = useState<HistoricalExperiment | null>(null);
+  const [showSecondaryTabs, setShowSecondaryTabs] = useState(false);
+
+  const PRIMARY_TABS = [
+    { id: 'Dashboard', label: '📊 Dashboard' },
+    { id: 'Projects', label: '📁 Projects' },
+    { id: 'Characters', label: '🎭 Characters' },
+    { id: 'Motion Studio', label: '🎬 Motion Studio' },
+    { id: 'Video Studio', label: '📹 Video Studio' },
+    { id: 'Asset Library', label: '🗄️ Asset Library' },
+  ];
+
+  const SECONDARY_TABS = [
+    'Generation Monitor',
+    'Overview',
+    'Experiment Gallery',
+    'Benchmarks',
+    'Ideas Studio',
+    'Script & Video Studio',
+    'Publishing Calendar',
+    'RAG Knowledge Store',
+    'Brands',
+    'Audience Profiles',
+    'Content Library',
+  ];
 
   const refresh = () => {
     api('GET', '/auth/me')
@@ -4599,27 +6753,138 @@ function App() {
           </div>
         ) : (
           <div>
-            <nav className="nav-tabs">
-              {[
-                'Generation Monitor',
-                'Overview',
-                'Experiment Gallery',
-                'Benchmarks',
-                'Ideas Studio',
-                'Script & Video Studio',
-                'Publishing Calendar',
-                'Characters',
-                'RAG Knowledge Store',
-                'Brands',
-                'Audience Profiles',
-                'Content Library'
-              ].map((t) => (
-                <button key={t} className={`nav-btn ${t === tab ? 'active' : ''}`} onClick={() => { setTab(t); refresh(); }}>
-                  {t}
-                </button>
-              ))}
-            </nav>
+            {/* Primary Creative Navigation */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 18 }}>
+              <nav className="nav-tabs" style={{ margin: 0 }}>
+                {PRIMARY_TABS.map((pt) => (
+                  <button
+                    key={pt.id}
+                    className={`nav-btn ${pt.id === tab ? 'active' : ''}`}
+                    onClick={() => { setTab(pt.id); refresh(); }}
+                  >
+                    {pt.label}
+                  </button>
+                ))}
+              </nav>
 
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => setShowSecondaryTabs(!showSecondaryTabs)}
+                style={{ fontSize: 12, padding: '6px 12px', color: '#94a3b8' }}
+              >
+                ⚙️ {showSecondaryTabs ? 'Hide System Tools' : 'System Tools & Labs'}
+              </button>
+            </div>
+
+            {/* Secondary System / Advanced Tools Bar */}
+            {showSecondaryTabs && (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 6,
+                  flexWrap: 'wrap',
+                  marginBottom: 20,
+                  padding: '10px 14px',
+                  background: '#090d16',
+                  borderRadius: 10,
+                  border: '1px solid #1e293b',
+                }}
+              >
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#64748b', alignSelf: 'center', marginRight: 4 }}>
+                  SYSTEM TOOLS:
+                </span>
+                {SECONDARY_TABS.map((t) => (
+                  <button
+                    key={t}
+                    className={`btn ${t === tab ? 'btn-gold' : 'btn-outline'}`}
+                    style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6 }}
+                    onClick={() => { setTab(t); refresh(); }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Studio Views */}
+            {tab === 'Dashboard' && (
+              <DashboardView
+                onNavigate={(t) => { setTab(t); refresh(); }}
+                onSelectCharacterForMotion={(charId) => {
+                  setActiveCharacterId(charId);
+                  setTab('Motion Studio');
+                }}
+                onSelectAnimationForVideo={(charId, animId) => {
+                  setActiveCharacterId(charId);
+                  setActiveAnimationId(animId);
+                  setTab('Video Studio');
+                }}
+              />
+            )}
+            {tab === 'Projects' && (
+              <ProjectsView
+                brands={brands}
+                onOpenCharacterInMotion={(charId) => {
+                  setActiveCharacterId(charId);
+                  setTab('Motion Studio');
+                }}
+                onOpenInVideoStudio={(charId, animId) => {
+                  setActiveCharacterId(charId);
+                  setActiveAnimationId(animId);
+                  setTab('Video Studio');
+                }}
+                onOpenInAssetLibrary={() => setTab('Asset Library')}
+              />
+            )}
+            {tab === 'Characters' && (
+              <CharactersStudio
+                brands={brands}
+                onAnimateCharacter={(char) => {
+                  setActiveCharacterId(char.id);
+                  setTab('Motion Studio');
+                }}
+              />
+            )}
+            {tab === 'Motion Studio' && (
+              <MotionStudio
+                brands={brands}
+                initialCharacterId={activeCharacterId}
+                onCreateVideo={(charId, animId) => {
+                  setActiveCharacterId(charId);
+                  setActiveAnimationId(animId);
+                  setTab('Video Studio');
+                }}
+                onGoToAssetLibrary={() => setTab('Asset Library')}
+              />
+            )}
+            {tab === 'Video Studio' && (
+              <VideoStudio
+                brands={brands}
+                initialCharacterId={activeCharacterId}
+                initialAnimationId={activeAnimationId}
+                onGoToAssetLibrary={() => setTab('Asset Library')}
+                onAnimateMore={(charId) => {
+                  setActiveCharacterId(charId);
+                  setTab('Motion Studio');
+                }}
+              />
+            )}
+            {tab === 'Asset Library' && (
+              <AssetLibraryView
+                onAnimateCharacter={(charId) => {
+                  setActiveCharacterId(charId);
+                  setTab('Motion Studio');
+                }}
+                onComposeFromAnimation={(charId, animId) => {
+                  setActiveCharacterId(charId);
+                  setActiveAnimationId(animId);
+                  setTab('Video Studio');
+                }}
+              />
+            )}
+
+            {/* Secondary Views */}
             {tab === 'Generation Monitor' && <GenerationMonitorView data={experimentsData} />}
             {tab === 'Overview' && <OverviewDashboard data={experimentsData} />}
             {tab === 'Experiment Gallery' && (
@@ -4632,7 +6897,6 @@ function App() {
             {tab === 'Ideas Studio' && <IdeasStudio brands={brands} />}
             {tab === 'Script & Video Studio' && <ScriptStudio brands={brands} />}
             {tab === 'Publishing Calendar' && <PublishingCalendar brands={brands} />}
-            {tab === 'Characters' && <CharactersStudio brands={brands} />}
             {tab === 'RAG Knowledge Store' && <RAGKnowledgeStudio />}
             {RESOURCES[tab] && <ResourceView key={tab} name={tab} />}
 

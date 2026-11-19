@@ -14,7 +14,7 @@ We evaluate candidates across six functional capability domains based on current
 
 | Candidate Model | Host / Provider | License / Commercial Rights | Cost per 1080x1920 Image | Latency / Inference Time | Character Quality | Verified Status & Notes |
 |---|---|---|:---:|:---:|:---:|---|
-| **SDXL-Lightning (4-step)** | Self-hosted (Colab / T4 GPU / Modal) | Open weights (Apache 2.0 / Commercial OK) | **~$0.001** (Self-hosted) | **1.5s–3.0s** on T4 GPU | 8.0 / 10 | **Verified**. Extremely fast, lightweight VRAM (6GB), ideal for local worker. |
+| **SDXL-Lightning (4-step)** | Self-hosted (Colab / T4 GPU / Modal) | Open weights (CreativeML Open RAIL++-M; subject to OpenRAIL use restrictions; commercial legal review required) | **~$0.001** (Self-hosted) | **1.5s–3.0s** on T4 GPU | 8.0 / 10 | **Verified**. Extremely fast, lightweight VRAM (6GB), ideal for local worker. |
 | **FLUX.1 [schnell]** | Self-hosted or Replicate / Together AI | Apache 2.0 (Open Commercial) | **~$0.003** (API) | **2.0s–4.0s** | 9.5 / 10 | **Verified**. State-of-the-art anatomy, skin pores, and prompt adherence. |
 | **Ideogram 2.0** | Hosted Commercial API | Proprietary Commercial API | ~$0.08 / image | 8.0s–12.0s | 9.2 / 10 | **Verified**. Excellent typography and styling, but higher API cost. |
 | **Procedural SVG + Resvg** | Local Node.js CPU (`@resvg/resvg-js`) | Permissive MIT | **₹0.00 ($0.00)** | **<0.1s on CPU** | 4.0 / 10 (Vector cards) | **Verified (Current Repo)**. Excellent fallback, but not photorealistic. |

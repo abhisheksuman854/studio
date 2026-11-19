@@ -30,34 +30,31 @@ export class LocalTTSProvider implements TTSProvider {
         try { fs.unlinkSync(tempAiff); } catch {}
 
         // Probe duration using ffprobe
-        try {
-          const { stdout } = await execFileAsync('ffprobe', [
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            outPath,
-          ]);
-          const probed = parseFloat(stdout.trim());
-          if (!isNaN(probed) && probed > 0) {
-            return { filePath: outPath, durationSec: Math.round(probed) };
-          }
-        } catch {
-          // If ffprobe is not found, use estimated duration
+        const { stdout } = await execFileAsync('ffprobe', [
+          '-v', 'error',
+          '-show_entries', 'format=duration',
+          '-of', 'default=noprint_wrappers=1:nokey=1',
+          outPath,
+        ]);
+        const probed = parseFloat(stdout.trim());
+        if (!isNaN(probed) && probed > 0.1 && fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+          return { filePath: outPath, durationSec: Math.max(2, Math.round(probed)) };
         }
-
-        return { filePath: outPath, durationSec: estimatedDuration };
+        throw new Error('Native say produced empty or silent audio track');
       } catch (err) {
-        console.warn('Native say command failed, falling back to FFmpeg synthesized track:', err);
+        console.warn('Native say command failed or produced empty audio, falling back to FFmpeg synthesized track:', err);
       }
     }
 
-    // Fallback: Use FFmpeg lavfi sine wave / noise audio generator for ₹0 environments
+    // Fallback: Use FFmpeg lavfi harmonic chime audio generator for ₹0 environments
     try {
       await execFileAsync('ffmpeg', [
         '-y',
         '-f', 'lavfi',
-        '-i', `anoisesrc=d=${estimatedDuration}:c=pink:r=44100:a=0.01`,
+        '-i', `sine=f=330:d=${estimatedDuration}`,
+        '-af', 'volume=0.35',
         '-c:a', 'libmp3lame',
+        '-b:a', '192k',
         outPath,
       ]);
     } catch {

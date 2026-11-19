@@ -939,6 +939,7 @@ export function createExperimentsRouter(db?: DB, options: { baseDir?: string } =
         characterBaseline: {
           referencePersona: 'Persona B (Latina Dance Performer)',
           model: 'SDXL Base 1.0 + ByteDance SDXL-Lightning 4-step UNet',
+          licence: 'CreativeML Open RAIL++-M (Subject to OpenRAIL++-M use restrictions; commercial legal review outstanding)',
           resolution: '1024 × 1024',
           device: 'Apple MPS (FP16 UNet) + CPU (FP32 VAE)',
           denoisingDuration: '9.4 s (4 Euler steps)',
