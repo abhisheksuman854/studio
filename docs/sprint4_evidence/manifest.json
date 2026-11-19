@@ -1,0 +1,107 @@
+{
+  "timestamp": "2026-11-19T11:18:00.000Z",
+  "documentId": "AURAVO-PRODUCT-SPRINT-4.1-UI-ACCEPTANCE-20261119",
+  "browser": "Google Chrome 154.0.8037.92 (Apple Silicon macOS)",
+  "baseUrl": "http://localhost:4000",
+  "verdict": "PASS — UNIFIED_AURAVO_PRODUCT_WORKFLOW_BROWSER_VERIFIED",
+  "totalScreenshots": 12,
+  "evidence": [
+    {
+      "id": "SCREENSHOT-01",
+      "step": "Dashboard View",
+      "filename": "01_dashboard_view.png",
+      "path": "docs/sprint4_evidence/01_dashboard_view.png",
+      "sizeBytes": 212973,
+      "description": "Dashboard view showing KPI stat cards (Characters, Motions, Videos, Campaigns), quick action buttons, and Core Production Pipeline."
+    },
+    {
+      "id": "SCREENSHOT-02",
+      "step": "Character Library View",
+      "filename": "02_character_library_view.png",
+      "path": "docs/sprint4_evidence/02_character_library_view.png",
+      "sizeBytes": 154003,
+      "description": "Character Library showing Aria Dev card, portrait thumbnail, visual identity tokens, and action buttons."
+    },
+    {
+      "id": "SCREENSHOT-03",
+      "step": "Character Dossier Modal",
+      "filename": "03_character_dossier_modal.png",
+      "path": "docs/sprint4_evidence/03_character_dossier_modal.png",
+      "sizeBytes": 217373,
+      "description": "Character Dossier modal displaying visual tokens, technical identity parameters, and 'Animate in Motion Studio' CTA."
+    },
+    {
+      "id": "SCREENSHOT-04",
+      "step": "Motion Studio Pre-Selected Character",
+      "filename": "04_motion_studio_selected_character.png",
+      "path": "docs/sprint4_evidence/04_motion_studio_selected_character.png",
+      "sizeBytes": 230256,
+      "description": "Motion Studio view showing Aria Dev pre-selected, loaded reference portrait, and preset selector."
+    },
+    {
+      "id": "SCREENSHOT-05",
+      "step": "Generated Animation Preview",
+      "filename": "05_motion_studio_generated_animation.png",
+      "path": "docs/sprint4_evidence/05_motion_studio_generated_animation.png",
+      "sizeBytes": 283201,
+      "description": "Motion Studio video player previewing genuine generated wave animation."
+    },
+    {
+      "id": "SCREENSHOT-06",
+      "step": "Saved Animation in Library",
+      "filename": "06_motion_studio_saved_animation_library.png",
+      "path": "docs/sprint4_evidence/06_motion_studio_saved_animation_library.png",
+      "sizeBytes": 276497,
+      "description": "Motion Studio saved library showing generated wave animation with 'Compose Video from this Animation' handoff."
+    },
+    {
+      "id": "SCREENSHOT-07",
+      "step": "Video Studio Pre-Selected Assets",
+      "filename": "07_video_studio_selected_character_animation.png",
+      "path": "docs/sprint4_evidence/07_video_studio_selected_character_animation.png",
+      "sizeBytes": 211453,
+      "description": "Video Studio view showing pre-selected Aria Dev and Wave animation, aspect ratio buttons, and canvas options."
+    },
+    {
+      "id": "SCREENSHOT-08",
+      "step": "Composed Video Preview",
+      "filename": "08_video_studio_composed_video_preview.png",
+      "path": "docs/sprint4_evidence/08_video_studio_composed_video_preview.png",
+      "sizeBytes": 254277,
+      "description": "Video Studio video player displaying rendered 9:16 MP4 composition with subtitles, logo overlay, and stereo audio."
+    },
+    {
+      "id": "SCREENSHOT-09",
+      "step": "Saved Video in Library",
+      "filename": "09_video_studio_saved_video_library.png",
+      "path": "docs/sprint4_evidence/09_video_studio_saved_video_library.png",
+      "sizeBytes": 250298,
+      "description": "Video Studio library showing the persistent composed video entry, resolution badge, and direct media link."
+    },
+    {
+      "id": "SCREENSHOT-10",
+      "step": "Projects View with Deliverables",
+      "filename": "10_projects_view_campaign_deliverables.png",
+      "path": "docs/sprint4_evidence/10_projects_view_campaign_deliverables.png",
+      "sizeBytes": 154587,
+      "description": "Projects view displaying 'Aria Dev — Royal Stage Performance Campaign' with linked Character, Animation, and Video."
+    },
+    {
+      "id": "SCREENSHOT-11",
+      "step": "Asset Library & Technical Dossier",
+      "filename": "11_asset_library_technical_dossier.png",
+      "path": "docs/sprint4_evidence/11_asset_library_technical_dossier.png",
+      "sizeBytes": 167948,
+      "description": "Asset Library view with category filter active and Technical Dossier modal displaying verified SHA-256 hash and path."
+    },
+    {
+      "id": "SCREENSHOT-12",
+      "step": "Mobile Responsive Viewport",
+      "filename": "12_mobile_responsive_viewport.png",
+      "path": "docs/sprint4_evidence/12_mobile_responsive_viewport.png",
+      "sizeBytes": 26861,
+      "description": "Mobile view (390x844) demonstrating responsive card wrapping, tab bar layout, and readable typography."
+    }
+  ]
+}
+
